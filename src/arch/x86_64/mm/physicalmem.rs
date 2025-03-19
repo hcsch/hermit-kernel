@@ -160,6 +160,7 @@ pub fn allocate_aligned(size: usize, align: usize) -> Result<PhysAddr, AllocErro
 
 /// This function must only be called from mm::deallocate!
 /// Otherwise, it may fail due to an empty node pool (POOL.maintain() is called in virtualmem::deallocate)
+/// ^ FIXME: outdated comment?
 pub fn deallocate(physical_address: PhysAddr, size: usize) {
 	assert!(size > 0);
 	assert_eq!(
