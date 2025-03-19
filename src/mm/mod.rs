@@ -257,7 +257,7 @@ pub(crate) fn print_information() {
 	arch::mm::virtualmem::print_information();
 }
 
-/// Soft-deprecated in favor of `DeviceAlloc`
+/// Soft-deprecated in favor of [`device_alloc::DeviceAlloc`]
 pub(crate) fn allocate(size: usize, no_execution: bool) -> VirtAddr {
 	let size = size.align_up(BasePageSize::SIZE as usize);
 	let physical_address = arch::mm::physicalmem::allocate(size).unwrap();
@@ -275,7 +275,7 @@ pub(crate) fn allocate(size: usize, no_execution: bool) -> VirtAddr {
 	virtual_address
 }
 
-/// Soft-deprecated in favor of `DeviceAlloc`
+/// Soft-deprecated in favor of [`device_alloc::DeviceAlloc`]
 pub(crate) fn deallocate(virtual_address: VirtAddr, size: usize) {
 	let size = size.align_up(BasePageSize::SIZE as usize);
 
