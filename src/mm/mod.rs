@@ -59,31 +59,39 @@ pub(crate) fn init() {
 		kernel_addr_range.start, kernel_addr_range.end
 	);
 
+	// Each page table fills exactly one base page
+	// Each entry is a pointer-size integer (with flag bits to be masked out to form a physical address),
+	// dictating the alignment requirement.
+	// Assuming `mem::align_of::<usize>() >= mem::size_of::<usize>()`
+	let num_entries_per_table = BasePageSize::SIZE as usize / mem::align_of::<usize>();
+
 	// we reserve physical memory for the required page tables
 	// In worst case, we use page size of BasePageSize::SIZE
-	let npages = total_mem / BasePageSize::SIZE as usize;
-	let npage_3tables = npages / (BasePageSize::SIZE as usize / mem::align_of::<usize>()) + 1;
-	let npage_2tables =
-		npage_3tables / (BasePageSize::SIZE as usize / mem::align_of::<usize>()) + 1;
-	let npage_1tables =
-		npage_2tables / (BasePageSize::SIZE as usize / mem::align_of::<usize>()) + 1;
-	let reserved_space = (npage_3tables + npage_2tables + npage_1tables)
-		* BasePageSize::SIZE as usize
-		+ 2 * LargePageSize::SIZE as usize;
+	let num_pages = total_mem / BasePageSize::SIZE as usize;
+	// Why +1, why not [`usize::div_ceil`]?
+	let num_lvl3_tables = num_pages / num_entries_per_table + 1;
+	let num_lvl2_tables = num_lvl3_tables / num_entries_per_table + 1;
+	let num_lvl1_tables = num_lvl2_tables / num_entries_per_table + 1;
+
+	let reserved_space_for_page_tables =
+		(num_lvl3_tables + num_lvl2_tables + num_lvl1_tables) * BasePageSize::SIZE as usize;
+	// Additional reserved space for IO devices and kernel scratch space
+	let reserved_space = reserved_space_for_page_tables + 2 * LargePageSize::SIZE as usize;
+
 	#[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
 	let has_1gib_pages = arch::processor::supports_1gib_pages();
 	let has_2mib_pages = arch::processor::supports_2mib_pages();
 
-	let min_mem = if env::is_uefi() {
+	let min_required_mem = if env::is_uefi() {
 		// On UEFI, the given memory is guaranteed free memory and the kernel is located before the given memory
 		reserved_space
 	} else {
 		(kernel_addr_range.end.as_u64() - env::get_ram_address().as_u64() + reserved_space as u64)
 			as usize
 	};
-	info!("Minimum memory size: {}", min_mem >> 20);
+	info!("Minimum required memory size: {}", min_required_mem >> 20);
 	let avail_mem = total_mem
-		.checked_sub(min_mem)
+		.checked_sub(min_required_mem)
 		.unwrap_or_else(|| panic!("Not enough memory available!"))
 		.align_down(LargePageSize::SIZE as usize);
 
@@ -98,6 +106,8 @@ pub(crate) fn init() {
 		// we reserve at least 75% of the memory for the user space
 		let reserve: usize = (avail_mem * 75) / 100;
 		// 64 MB is enough as kernel heap
+		// NOTE: why reserve min(75% of available memory, 64MB) instead of min(25% of available memory, 64MB)? seems inconsistent with "we reserve at least 75% of the memory for the user space"
+		//       or is this not the space to reserve for the kernel heap, but for the user space?
 		let reserve = core::cmp::min(reserve, 0x0400_0000);
 
 		let virt_size: usize = reserve.align_down(LargePageSize::SIZE as usize);
