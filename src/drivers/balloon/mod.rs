@@ -2,16 +2,19 @@ use alloc::vec::Vec;
 use core::fmt::Debug;
 
 use pci_types::InterruptLine;
+use smallvec::smallvec;
 use virtio::FeatureBits;
 use virtio::balloon::{ConfigVolatileFieldAccess as _, F};
 use volatile::VolatileRef;
 
 use super::Driver;
-use super::virtio::virtqueue::VirtQueue;
+use super::virtio::virtqueue::error::VirtqError;
+use super::virtio::virtqueue::{AvailBufferToken, BufferElem, BufferType, VirtQueue, Virtq as _};
 #[cfg(not(feature = "pci"))]
 use crate::drivers::virtio::transport::mmio::{ComCfg, IsrStatus, NotifCfg};
 #[cfg(feature = "pci")]
 use crate::drivers::virtio::transport::pci::{ComCfg, IsrStatus, NotifCfg};
+use crate::mm::device_alloc::DeviceAlloc;
 
 #[cfg(feature = "pci")]
 mod pci;
@@ -135,6 +138,102 @@ impl Driver for VirtioBalloonDriver {
 
 	fn get_name(&self) -> &'static str {
 		"virtio-balloon"
+	}
+}
+
+struct BalloonVq {
+	vq: Option<VirtQueue>,
+}
+
+impl BalloonVq {
+	pub fn new() -> Self {
+		Self { vq: None }
+	}
+
+	fn init(&mut self, vq: VirtQueue) {
+		self.vq = Some(vq);
+	}
+
+	pub fn enable_notifs(&mut self) {
+		let Some(vq) = &mut self.vq else {
+			debug!("<balloon> BalloonVq::enable_notifs called on uninitialized vq");
+			return;
+		};
+
+		vq.enable_notifs();
+	}
+
+	pub fn disable_notifs(&mut self) {
+		let Some(vq) = &mut self.vq else {
+			debug!("<balloon> BalloonVq::disable_notifs called on uninitialized vq");
+			return;
+		};
+
+		vq.disable_notifs();
+	}
+
+	/// Discard all new page indices marked used by the host.
+	/// These are the page indices we have previously sent into the queue in available buffers.
+	pub fn discard_new_used(&mut self) {
+		let Some(vq) = &mut self.vq else {
+			debug!("<balloon> BalloonVq::discard_new_used called on uninitialized vq");
+			panic!("BalloonVq must be initialized before calling discard_new_used");
+		};
+
+		loop {
+			match vq.try_recv() {
+				Ok(_new_used) => (),
+
+				Err(VirtqError::NoNewUsed) => break,
+
+				Err(error) => {
+					panic!(
+						"Failed to receive new used virtqueue descriptors with unexpected error: {error:?}"
+					)
+				}
+			}
+		}
+	}
+
+	/// Send specified pages into the balloon virtqueue.
+	///
+	/// To ensure that there is enough space in the queue, call
+	/// [`Self::discard_new_used`] before sending.
+	///
+	/// The page indices are of 4096B (4K) pages and are submitted as `u32`s,
+	/// i.e. only pages up to (2³² - 1) * 4096 B = 16 TiB in our physical memory
+	/// can be submitted here.
+	///
+	/// # Safety
+	/// The caller must ensure that the pages of which the indices are sent into
+	/// the inflate queue are not used by the kernel or the application until they
+	/// have been deflated again via the deflate queue
+	/// (with or without acknowledgement by the host depending on [`F::MUST_TELL_HOST`]).
+	pub unsafe fn send_pages(
+		&mut self,
+		page_indices: impl Iterator<Item = u32>,
+		notif: bool,
+	) -> Result<(), VirtqError> {
+		let Some(vq) = &mut self.vq else {
+			error!("<balloon> BalloonVq::send_pages called on uninitialized vq");
+			panic!("BalloonVq must be initialized before calling send_pages");
+		};
+
+		let mut page_indices_bytes = Vec::new_in(DeviceAlloc);
+		page_indices
+			// Not specified as little-endian by the spec? Linux does it little-endian for VIRTIO 1.0
+			.flat_map(|index| index.to_le_bytes())
+			.collect_into(&mut page_indices_bytes);
+
+		let buff_tkn = AvailBufferToken::new(
+			smallvec![BufferElem::Vector(page_indices_bytes)],
+			smallvec![],
+		)
+		.expect("We have specified a send_buff so AvailBufferToken::new should succeed");
+
+		vq.dispatch(buff_tkn, notif, BufferType::Direct)?;
+
+		Ok(())
 	}
 }
 
