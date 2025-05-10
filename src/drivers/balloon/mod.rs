@@ -9,7 +9,11 @@ use volatile::VolatileRef;
 
 use super::Driver;
 use super::virtio::virtqueue::error::VirtqError;
-use super::virtio::virtqueue::{AvailBufferToken, BufferElem, BufferType, VirtQueue, Virtq as _};
+use super::virtio::virtqueue::split::SplitVq;
+use super::virtio::virtqueue::{
+	AvailBufferToken, BufferElem, BufferType, VirtQueue, Virtq as _, VqIndex, VqSize,
+};
+use crate::VIRTIO_MAX_QUEUE_SIZE;
 #[cfg(not(feature = "pci"))]
 use crate::drivers::virtio::transport::mmio::{ComCfg, IsrStatus, NotifCfg};
 #[cfg(feature = "pci")]
@@ -49,8 +53,10 @@ pub(crate) struct VirtioBalloonDriver {
 	com_cfg: ComCfg,
 	isr_stat: IsrStatus,
 	notif_cfg: NotifCfg,
-	vqueues: Vec<VirtQueue>,
 	irq: InterruptLine,
+
+	inflateq: BalloonVq,
+	deflateq: BalloonVq,
 }
 
 // Backend-independent interface for VIRTIO traditional memory balloon driver
@@ -121,8 +127,27 @@ impl VirtioBalloonDriver {
 			});
 		}
 
-		// For now our feature set is empty (except for the v1 spec compliance feature)
-		// so we have nothing more to do.
+		self.inflateq.init(VirtQueue::Split(
+			SplitVq::new(
+				&mut self.com_cfg,
+				&self.notif_cfg,
+				VqSize::from(VIRTIO_MAX_QUEUE_SIZE),
+				VqIndex::from(0u16),
+				self.dev_cfg.features.into(),
+			)
+			.expect("Failed to create SplitVq for inflateq due to invalid parameters (bug)"),
+		));
+
+		self.deflateq.init(VirtQueue::Split(
+			SplitVq::new(
+				&mut self.com_cfg,
+				&self.notif_cfg,
+				VqSize::from(VIRTIO_MAX_QUEUE_SIZE),
+				VqIndex::from(1u16),
+				self.dev_cfg.features.into(),
+			)
+			.expect("Failed to create SplitVq for deflateq due to invalid parameters (bug)"),
+		));
 
 		// At this point the device is "live"
 		self.com_cfg.drv_ok();
