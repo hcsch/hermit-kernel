@@ -13,7 +13,8 @@ pub mod pci;
 #[cfg(any(
 	all(any(feature = "tcp", feature = "udp"), not(feature = "rtl8139")),
 	feature = "fuse",
-	feature = "vsock"
+	feature = "vsock",
+	feature = "balloon"
 ))]
 pub mod virtio;
 #[cfg(feature = "vsock")]
@@ -41,7 +42,8 @@ pub mod error {
 	#[cfg(any(
 		all(any(feature = "tcp", feature = "udp"), not(feature = "rtl8139")),
 		feature = "fuse",
-		feature = "vsock"
+		feature = "vsock",
+		feature = "balloon"
 	))]
 	use crate::drivers::virtio::error::VirtioError;
 
@@ -50,7 +52,8 @@ pub mod error {
 		#[cfg(any(
 			all(any(feature = "tcp", feature = "udp"), not(feature = "rtl8139")),
 			feature = "fuse",
-			feature = "vsock"
+			feature = "vsock",
+			feature = "balloon"
 		))]
 		InitVirtioDevFail(VirtioError),
 		#[cfg(all(target_arch = "x86_64", feature = "rtl8139"))]
@@ -62,7 +65,8 @@ pub mod error {
 	#[cfg(any(
 		all(any(feature = "tcp", feature = "udp"), not(feature = "rtl8139")),
 		feature = "fuse",
-		feature = "vsock"
+		feature = "vsock",
+		feature = "balloon"
 	))]
 	impl From<VirtioError> for DriverError {
 		fn from(err: VirtioError) -> Self {
@@ -91,7 +95,8 @@ pub mod error {
 				#[cfg(any(
 					all(any(feature = "tcp", feature = "udp"), not(feature = "rtl8139")),
 					feature = "fuse",
-					feature = "vsock"
+					feature = "vsock",
+					feature = "balloon"
 				))]
 				DriverError::InitVirtioDevFail(ref err) => {
 					write!(f, "Virtio driver failed: {err:?}")
