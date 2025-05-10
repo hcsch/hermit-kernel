@@ -1,9 +1,7 @@
-use alloc::vec::Vec;
-
 use virtio::pci::IsrStatus;
 use volatile::VolatileRef;
 
-use super::{BalloonDevCfg, VirtioBalloonDriver, VirtioBalloonError};
+use super::{BalloonDevCfg, BalloonVq, VirtioBalloonDriver, VirtioBalloonError};
 use crate::drivers::pci::PciDevice;
 use crate::drivers::virtio::error::VirtioError;
 use crate::drivers::virtio::transport::pci::{self as virtio_pci, PciCap, UniCapsColl};
@@ -56,8 +54,10 @@ impl VirtioBalloonDriver {
 			com_cfg,
 			isr_stat: isr_cfg,
 			notif_cfg,
-			vqueues: Vec::new(),
 			irq: device.get_irq().unwrap(),
+
+			inflateq: BalloonVq::new(),
+			deflateq: BalloonVq::new(),
 		})
 	}
 
