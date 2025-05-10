@@ -1779,8 +1779,6 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "virtio-spec"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49c4d9057347dd68d5c3f9ac5ec5d76adfe59d7378c4ae44f022795aa42953e6"
 dependencies = [
  "allocator-api2",
  "bitfield-struct",
