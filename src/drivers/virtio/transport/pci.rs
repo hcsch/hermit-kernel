@@ -878,7 +878,7 @@ pub(crate) fn init_device(
 			}
 			Err(virtio_error) => {
 				error!(
-					"Virtio traditional memory balloon driver could not be initialized with device: {device_id:x}"
+					"Virtio traditional memory balloon driver could not be initialized with device id {device_id:x}: {virtio_error}"
 				);
 				Err(DriverError::InitVirtioDevFail(virtio_error))
 			}
