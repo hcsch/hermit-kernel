@@ -1,5 +1,7 @@
 //! A module containing hermit-rs driver, hermit-rs driver trait and driver specific errors.
 
+#[cfg(feature = "balloon")]
+pub mod balloon;
 #[cfg(feature = "fuse")]
 pub mod fs;
 #[cfg(not(feature = "pci"))]
