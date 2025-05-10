@@ -5,7 +5,7 @@
         "--quiet",
         "--workspace",
         "--message-format=json",
-        "--all-targets",
+        "--all-targets"
     ],
     // "rust-analyzer.cargo.target": "aarch64-unknown-none-softfloat",
     // "rust-analyzer.cargo.target": "riscv64gc-unknown-none-elf",
@@ -14,15 +14,32 @@
         "cargo",
         "clippy",
         "-Zbuild-std=core,alloc",
-        "--quiet",
         "--message-format=json",
+        // "--features=acpi",
+        // "--features=fsgsbase",
+        // "--features=smp",
+        // "--features=tcp",
+        // "--features=dhcpv4",
+        // "--no-default-features",
+
+        "--features=balloon",
         // "--target=aarch64-unknown-none-softfloat",
         // "--target=riscv64gc-unknown-none-elf",
-        "--target=x86_64-unknown-none",
+        "--target=x86_64-unknown-none"
     ],
     "rust-analyzer.check.targets": [
         "aarch64-unknown-none-softfloat",
         "riscv64gc-unknown-none-elf",
-        "x86_64-unknown-none",
+        "x86_64-unknown-none"
     ],
+    "rust-analyzer.cargo.features": [
+        "balloon"
+
+        // "acpi",
+        // "fsgsbase",
+        // "smp",
+        // "tcp",
+        // "dhcpv4"
+    ]
+    // "rust-analyzer.cargo.noDefaultFeatures": true
 }
