@@ -1,7 +1,7 @@
 use virtio::pci::IsrStatus;
 use volatile::VolatileRef;
 
-use super::{BalloonDevCfg, BalloonVq, VirtioBalloonDriver, VirtioBalloonError};
+use super::{BalloonDevCfg, BalloonMap, BalloonVq, VirtioBalloonDriver, VirtioBalloonError};
 use crate::drivers::pci::PciDevice;
 use crate::drivers::virtio::error::VirtioError;
 use crate::drivers::virtio::transport::pci::{self as virtio_pci, PciCap, UniCapsColl};
@@ -58,6 +58,13 @@ impl VirtioBalloonDriver {
 
 			inflateq: BalloonVq::new(),
 			deflateq: BalloonVq::new(),
+
+			num_in_balloon: 0,
+			num_pending_inflation: 0,
+			num_pending_deflation: 0,
+			num_targeted: 0,
+
+			balloon_map: BalloonMap::new(),
 		})
 	}
 
