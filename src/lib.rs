@@ -31,7 +31,7 @@
 	reexport_test_harness_main = "test_main"
 )]
 #![cfg_attr(all(target_os = "none", test), no_main)]
-#![cfg_attr(feature = "balloon", feature(iter_collect_into))]
+#![cfg_attr(feature = "balloon", feature(iter_collect_into, iter_array_chunks))]
 
 // EXTERNAL CRATES
 #[macro_use]

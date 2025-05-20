@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+#[cfg(feature = "balloon")]
+mod balloon;
 #[cfg(any(feature = "tcp", feature = "udp"))]
 pub(crate) mod device;
 #[cfg(any(feature = "tcp", feature = "udp"))]
@@ -127,6 +129,8 @@ pub fn init() {
 	crate::executor::network::init();
 	#[cfg(feature = "vsock")]
 	crate::executor::vsock::init();
+	#[cfg(feature = "balloon")]
+	crate::executor::balloon::init();
 }
 
 /// Blocks the current thread on `f`, running the executor when idling.
