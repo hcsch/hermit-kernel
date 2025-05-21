@@ -552,7 +552,13 @@ impl BalloonMap {
 /// Represents the data inside a page and ensures alignment to 4K page boundaries
 /// as 4K pages are what the balloon device works with, exclusively.
 #[repr(align(4096))]
-struct BalloonPageData([u8; BASE_PAGE_SIZE]);
+struct BalloonPageData(
+	#[expect(
+		dead_code,
+		reason = "contents are owned by the host and should not be read by us"
+	)]
+	[u8; BASE_PAGE_SIZE],
+);
 
 impl Debug for BalloonPageData {
 	fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
