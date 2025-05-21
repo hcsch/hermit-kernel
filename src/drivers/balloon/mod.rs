@@ -184,6 +184,7 @@ impl VirtioBalloonDriver {
 	}
 
 	pub(crate) fn poll_events(&mut self) {
+		trace!("Balloon device received poll");
 		self.adjust_balloon_size();
 
 		let mut changed = false;
@@ -408,6 +409,9 @@ impl BalloonVq {
 				Ok(new_used) => {
 					let num_page_indices =
 						Self::used_send_buff_to_page_indices(new_used.send_buff).count();
+					trace!(
+						"Discarded used buffer received from host with {num_page_indices} page indices"
+					);
 					num_discarded += num_page_indices;
 				}
 
@@ -502,6 +506,8 @@ impl BalloonMap {
 		let page = BalloonPage::allocate()?;
 		let page_index = page.phys_page_index();
 
+		trace!("Allocated ballon page with index {page_index}");
+
 		if let Some(old_balloon_page) = self.page_map.insert(page_index, page) {
 			error!(
 				"Allocated to same physical page twice concurrently: {old_balloon_page:?}, page_index = 0x{page_index:x}"
@@ -537,6 +543,8 @@ impl BalloonMap {
 				);
 				panic!("Deallocation of invalid balloon page");
 			};
+
+			trace!("Deallocated ballon page with index {page_index}");
 		}
 	}
 }
