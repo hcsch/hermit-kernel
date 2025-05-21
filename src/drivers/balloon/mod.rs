@@ -405,8 +405,10 @@ impl BalloonVq {
 
 		loop {
 			match vq.try_recv() {
-				Ok(_new_used) => {
-					num_discarded += 1;
+				Ok(new_used) => {
+					let num_page_indices =
+						Self::used_send_buff_to_page_indices(new_used.send_buff).count();
+					num_discarded += num_page_indices;
 				}
 
 				Err(VirtqError::NoNewUsed) => break,
