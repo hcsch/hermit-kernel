@@ -514,7 +514,7 @@ impl BalloonMap {
 		core::iter::from_fn(|| match self.allocate_page() {
 			Ok(page_index) => Some(page_index),
 			Err(alloc_error) => {
-				error!(
+				warn!(
 					"Failed to allocate new pages to fill the balloon with, continuing with as many as possible: {alloc_error}"
 				);
 
