@@ -224,6 +224,60 @@ impl VirtioBalloonDriver {
 		}
 	}
 
+	fn deflate(&mut self, num_pages_to_deflate: u32) {
+		assert!(
+			num_pages_to_deflate <= self.num_in_balloon - self.num_pending_deflation,
+			"Can't deflate more pages than there are in the balloon"
+		);
+
+		let mut page_indices = Vec::new_in(DeviceAlloc);
+
+		self.balloon_map
+			.get_indices_for_deallocation()
+			.take(num_pages_to_deflate as usize)
+			.collect_into(&mut page_indices);
+
+		// SAFETY: We ensure with our balloon map that we only deflate pages
+		//         that we have previously inflated into the balloon.
+		//         Deflating also does not give the host ownership over
+		//         additional memory of ours. Merely sending the indices into
+		//         the queue does not yet deallocate the pages on our side.
+		unsafe {
+			self.deflateq
+				.send_pages(page_indices.iter().copied(), false)
+				.expect("Failed to send pages into the deflateq");
+		}
+
+		// SAFETY: For now we don't have [`F::MUST_TELL_HOST`] support, so
+		//         we can deallocate all pages immediately once we have sent
+		//         them into the deflateq. See VIRTIO v1.2 5.5.6 3.
+		unsafe {
+			self.balloon_map.deallocate_pages(page_indices.into_iter());
+		}
+
+		self.num_pending_deflation += num_pages_to_deflate;
+	}
+
+	fn inflate(&mut self, num_pages_to_inflate: u32) {
+		let page_indices = self
+			.balloon_map
+			.allocate_pages()
+			.take(num_pages_to_inflate as usize);
+
+		// SAFETY: We ensure with our balloon map that we only inflate pages
+		//         that we have allocated via the global allocator. Inflating
+		//         a page hands ownership over to the host, but we ensure that
+		//         the contents of the page are not used until the page has
+		//         been deflated again by keeping our allocation in the balloon map.
+		unsafe {
+			self.inflateq
+				.send_pages(page_indices, false)
+				.expect("Failed to send pages into the inflateq");
+		}
+
+		self.num_pending_inflation += num_pages_to_inflate;
+	}
+
 	fn adjust_balloon_size(&mut self) {
 		trace!("<balloon> Adjusting balloon size if necessary");
 		let Some(new_target_num_pages) = self.num_pages_changed() else {
@@ -240,32 +294,7 @@ impl VirtioBalloonDriver {
 				self.num_in_balloon, self.num_pending_deflation
 			);
 
-			let mut page_indices = Vec::new_in(DeviceAlloc);
-
-			self.balloon_map
-				.get_indices_for_deallocation()
-				.take(num_to_deflate as usize)
-				.collect_into(&mut page_indices);
-
-			// SAFETY: We ensure with our balloon map that we only deflate pages
-			//         that we have previously inflated into the balloon.
-			//         Deflating also does not give the host ownership over
-			//         additional memory of ours. Merely sending the indices into
-			//         the queue does not yet deallocate the pages on our side.
-			unsafe {
-				self.deflateq
-					.send_pages(page_indices.iter().copied(), false)
-					.expect("Failed to send pages into the deflateq");
-			}
-
-			// SAFETY: For now we don't have [`F::MUST_TELL_HOST`] support, so
-			//         we can deallocate all pages immediately once we have sent
-			//         them into the deflateq. See VIRTIO v1.2 5.5.6 3.
-			unsafe {
-				self.balloon_map.deallocate_pages(page_indices.into_iter());
-			}
-
-			self.num_pending_deflation += num_to_deflate;
+			self.deflate(num_to_deflate);
 		} else if new_target_num_pages > self.num_in_balloon + self.num_pending_inflation {
 			let num_to_inflate =
 				new_target_num_pages - (self.num_in_balloon + self.num_pending_inflation);
@@ -275,23 +304,7 @@ impl VirtioBalloonDriver {
 				self.num_in_balloon, self.num_pending_inflation
 			);
 
-			let page_indices = self
-				.balloon_map
-				.allocate_pages()
-				.take(num_to_inflate as usize);
-
-			// SAFETY: We ensure with our balloon map that we only inflate pages
-			//         that we have allocated via the global allocator. Inflating
-			//         a page hands ownership over to the host, but we ensure that
-			//         the contents of the page are not used until the page has
-			//         been deflated again by keeping our allocation in the balloon map.
-			unsafe {
-				self.inflateq
-					.send_pages(page_indices, false)
-					.expect("Failed to send pages into the inflateq");
-			}
-
-			self.num_pending_inflation += num_to_inflate;
+			self.inflate(num_to_inflate);
 		}
 	}
 }
