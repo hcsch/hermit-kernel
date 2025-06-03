@@ -22,5 +22,9 @@ async fn balloon_run() {
 pub(crate) fn init() {
 	info!("Try to initialize balloon interface!");
 
+	if let Some(driver) = pci::get_balloon_driver() {
+		driver.lock().enable_interrupts();
+	}
+
 	spawn(balloon_run());
 }
