@@ -1,0 +1,3 @@
+[submodule "talc"]
+	path = talc
+	url = https://github.com/SFBdragon/talc.git

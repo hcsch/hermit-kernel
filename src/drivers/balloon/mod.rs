@@ -1,15 +1,15 @@
-use alloc::alloc::AllocError;
 use alloc::boxed::Box;
+use alloc::collections::vec_deque::VecDeque;
 use alloc::vec::Vec;
+use core::alloc::Layout;
 use core::fmt::Debug;
-use core::mem::MaybeUninit;
+use core::num::{NonZeroU32, NonZeroUsize};
+use core::ptr::NonNull;
 
-use ahash::RandomState;
-use hashbrown::HashMap;
 use memory_addresses::VirtAddr;
-use memory_addresses::arch::riscv64::BASE_PAGE_SIZE;
 use pci_types::InterruptLine;
 use smallvec::{SmallVec, smallvec};
+use talc::Talc;
 use virtio::FeatureBits;
 use virtio::balloon::{ConfigVolatileFieldAccess as _, F};
 use volatile::VolatileRef;
@@ -19,15 +19,20 @@ use super::virtio::virtqueue::error::VirtqError;
 use super::virtio::virtqueue::split::SplitVq;
 use super::virtio::virtqueue::{AvailBufferToken, BufferElem, BufferType, Virtq, VqIndex, VqSize};
 use crate::VIRTIO_MAX_QUEUE_SIZE;
-use crate::arch::mm::paging::virtual_to_physical;
 #[cfg(not(feature = "pci"))]
 use crate::drivers::virtio::transport::mmio::{ComCfg, IsrStatus, NotifCfg};
 #[cfg(feature = "pci")]
 use crate::drivers::virtio::transport::pci::{ComCfg, IsrStatus, NotifCfg};
+use crate::mm::allocator::HermitOomHandler;
 use crate::mm::device_alloc::DeviceAlloc;
+use crate::mm::{ALLOCATOR, virtual_to_physical};
 
 #[cfg(feature = "pci")]
+pub mod oom;
+#[cfg(feature = "pci")]
 mod pci;
+
+const BALLOON_PAGE_SIZE: usize = 4096;
 
 /// A wrapper struct for the raw configuration structure.
 /// Handling the right access to fields, as some are read-only
@@ -222,45 +227,41 @@ impl VirtioBalloonDriver {
 		}
 	}
 
-	fn deflate(&mut self, num_pages_to_deflate: u32) {
+	fn deflate(&mut self, talc: &mut Talc<HermitOomHandler>, num_pages_to_deflate: u32) {
 		assert!(
 			num_pages_to_deflate <= self.num_in_balloon - self.num_pending_deflation,
 			"Can't deflate more pages than there are in the balloon"
 		);
 
-		let mut page_indices = Vec::new_in(DeviceAlloc);
+		let page_indices = self
+			.balloon_map
+			.mark_pages_for_deflation(num_pages_to_deflate);
 
-		self.balloon_map
-			.get_indices_for_deallocation()
-			.take(num_pages_to_deflate as usize)
-			.collect_into(&mut page_indices);
-
-		// SAFETY: We ensure with our balloon map that we only deflate pages
-		//         that we have previously inflated into the balloon.
-		//         Deflating also does not give the host ownership over
-		//         additional memory of ours. Merely sending the indices into
-		//         the queue does not yet deallocate the pages on our side.
-		unsafe {
-			self.deflateq
-				.send_pages(page_indices.iter().copied(), false)
-				.expect("Failed to send pages into the deflateq");
+		for chunk_page_indices in &page_indices {
+			// SAFETY: We ensure with our balloon map that we only deflate pages
+			//         that we have previously inflated into the balloon.
+			//         Deflating also does not give the host ownership over
+			//         additional memory of ours. Merely sending the indices into
+			//         the queue does not yet deallocate the pages on our side.
+			unsafe {
+				self.deflateq
+					.send_pages(chunk_page_indices.iter().copied(), false)
+					.expect("Failed to send pages into the deflateq");
+			}
 		}
 
 		// SAFETY: For now we don't have [`F::MUST_TELL_HOST`] support, so
 		//         we can deallocate all pages immediately once we have sent
 		//         them into the deflateq. See VIRTIO v1.2 5.5.6 3.
 		unsafe {
-			self.balloon_map.deallocate_pages(page_indices.into_iter());
+			self.balloon_map.shrink_chunks(talc, page_indices);
 		}
 
 		self.num_pending_deflation += num_pages_to_deflate;
 	}
 
-	fn inflate(&mut self, num_pages_to_inflate: u32) {
-		let page_indices = self
-			.balloon_map
-			.allocate_pages()
-			.take(num_pages_to_inflate as usize);
+	fn inflate(&mut self, talc: &mut Talc<HermitOomHandler>, num_pages_to_inflate: u32) {
+		let page_indices = self.balloon_map.allocate_chunks(talc, num_pages_to_inflate);
 
 		// SAFETY: We ensure with our balloon map that we only inflate pages
 		//         that we have allocated via the global allocator. Inflating
@@ -291,7 +292,7 @@ impl VirtioBalloonDriver {
 				self.num_in_balloon, self.num_pending_deflation
 			);
 
-			self.deflate(num_to_deflate);
+			self.deflate(&mut ALLOCATOR.inner().lock(), num_to_deflate);
 		} else if new_target_num_pages > self.num_in_balloon + self.num_pending_inflation {
 			let num_to_inflate =
 				new_target_num_pages - (self.num_in_balloon + self.num_pending_inflation);
@@ -301,7 +302,53 @@ impl VirtioBalloonDriver {
 				self.num_in_balloon, self.num_pending_inflation
 			);
 
-			self.inflate(num_to_inflate);
+			self.inflate(&mut ALLOCATOR.inner().lock(), num_to_inflate);
+		}
+	}
+
+	pub fn disable_interrupts(&mut self) {
+		self.inflateq.disable_notifs();
+		self.deflateq.disable_notifs();
+	}
+
+	pub fn enable_interrupts(&mut self) {
+		self.inflateq.enable_notifs();
+		self.deflateq.enable_notifs();
+	}
+
+	pub fn num_deflatable_for_oom(&self) -> u32 {
+		self.num_in_balloon
+			.saturating_sub(self.dev_cfg.num_pages())
+			.saturating_sub(self.num_pending_deflation)
+	}
+
+	pub fn deflate_for_oom(
+		&mut self,
+		talc: &mut Talc<HermitOomHandler>,
+		failed_alloc_num_pages: u32,
+	) -> Result<(), ()> {
+		// We don't really know how much space Talc has left.
+		// The allocation might have failed only by a short margin, or by a lot.
+
+		let num_deflatable = self.num_deflatable_for_oom();
+
+		if num_deflatable > 0 {
+			// Deflate as many pages as we can up to the amount needed for the allocation.
+			// We don't have to wait for host acknowledgement, because for now
+			// we don't support [`F::MUST_TELL_HOST`].
+
+			let num_to_deflate = num_deflatable.min(failed_alloc_num_pages);
+
+			info!(
+				"Deflating {num_to_deflate} pages in an attempt to recover from an OOM condition"
+			);
+
+			self.deflate(talc, num_to_deflate);
+			Ok(())
+		} else {
+			error!("Unable to deflate balloon further");
+			// Nothing more we can do
+			Err(())
 		}
 	}
 }
@@ -455,9 +502,9 @@ impl BalloonVq {
 	/// the inflate queue are not used by the kernel or the application until they
 	/// have been deflated again via the deflate queue
 	/// (with or without acknowledgement by the host depending on [`F::MUST_TELL_HOST`]).
-	pub unsafe fn send_pages(
+	pub unsafe fn send_pages<I: IntoIterator<Item = u32>>(
 		&mut self,
-		page_indices: impl Iterator<Item = u32>,
+		page_indices: I,
 		notif: bool,
 	) -> Result<(), VirtqError> {
 		let Some(vq) = &mut self.vq else {
@@ -467,6 +514,7 @@ impl BalloonVq {
 
 		let mut page_indices_bytes = Vec::new_in(DeviceAlloc);
 		page_indices
+			.into_iter()
 			// Not specified as little-endian by the spec? Linux does it little-endian for VIRTIO 1.0
 			.flat_map(|index| index.to_le_bytes())
 			.collect_into(&mut page_indices_bytes);
@@ -503,111 +551,443 @@ pub enum VirtioBalloonError {
 
 #[derive(Debug)]
 struct BalloonMap {
-	/// A map from balloon page (4K) indices to [`BalloonPage`] objects that
-	/// represent the allocation of that page with the global allocator.
-	page_map: HashMap<u32, BalloonPage, RandomState>,
+	/// A stack of chunks of pages allocated for the balloon.
+	/// TODO: Ideally in order of decreasing size?
+	chunks: Vec<BalloonAllocation, DeviceAlloc>,
 }
 
 impl BalloonMap {
 	pub fn new() -> Self {
 		Self {
-			page_map: HashMap::with_hasher(RandomState::new()),
+			chunks: Vec::new_in(DeviceAlloc),
 		}
 	}
 
-	fn allocate_page(&mut self) -> Result<u32, AllocError> {
-		let page = BalloonPage::allocate()?;
-		let page_index = page.phys_page_index();
+	fn allocate_chunk(
+		&mut self,
+		talc: &mut Talc<HermitOomHandler>,
+		num_pages: NonZeroU32,
+	) -> Result<impl Iterator<Item = u32>, ()> {
+		let page = BalloonAllocation::try_allocate(talc, num_pages)?;
 
-		trace!("Allocated ballon page with index {page_index}");
+		self.chunks.push(page);
 
-		if let Some(old_balloon_page) = self.page_map.insert(page_index, page) {
-			error!(
-				"Allocated to same physical page twice concurrently: {old_balloon_page:?}, page_index = 0x{page_index:x}"
-			);
-			panic!("Physical page indices for concurrently allocated balloon pages must be unique");
-		}
+		// Only now get the iterator over physical indices, so it lives as long
+		// as chunks, instead of referencing the now moved page variable.
+		let mut page_indices = self
+			.chunks
+			.last()
+			.expect("We just pushed one chunk")
+			.phys_page_indices()
+			.peekable();
+		let first_page_index = *page_indices
+			.peek()
+			.expect("If the allocation didn't fail, we should have at least one page index");
 
-		Ok(page_index)
+		trace!(
+			"Allocated ballon page chunk starting at page index {first_page_index} with {num_pages} pages"
+		);
+
+		Ok(page_indices)
 	}
 
-	pub fn allocate_pages(&mut self) -> impl Iterator<Item = u32> {
-		core::iter::from_fn(|| match self.allocate_page() {
-			Ok(page_index) => Some(page_index),
-			Err(alloc_error) => {
-				warn!(
-					"Failed to allocate new pages to fill the balloon with, continuing with as many as possible: {alloc_error}"
-				);
+	pub fn allocate_chunks(
+		&mut self,
+		talc: &mut Talc<HermitOomHandler>,
+		target_num_pages: u32,
+	) -> Vec<u32, DeviceAlloc> {
+		let mut page_indices = Vec::new_in(DeviceAlloc);
+		let mut current_pow_2 = target_num_pages.ilog2();
+		let mut num_remaining = target_num_pages;
 
-				None
-			}
-		})
-	}
-
-	pub fn get_indices_for_deallocation(&self) -> impl Iterator<Item = u32> + Clone {
-		self.page_map.keys().copied()
-	}
-
-	pub unsafe fn deallocate_pages(&mut self, page_indices: impl Iterator<Item = u32>) {
-		for page_index in page_indices {
-			let Some(_page) = self.page_map.remove(&page_index) else {
-				error!(
-					"Attempted to deallocate balloon page with index for which no page was stored: page_index = 0x{page_index:x}"
-				);
-				panic!("Deallocation of invalid balloon page");
+		loop {
+			let Some(current_pow_2_nz) = NonZeroU32::new(current_pow_2) else {
+				if num_remaining > 0 {
+					warn!(
+						"Failed to allocate new pages to fill the balloon with, continuing with as many as possible"
+					);
+				}
+				break;
 			};
 
-			trace!("Deallocated ballon page with index {page_index}");
+			match self.allocate_chunk(talc, current_pow_2_nz) {
+				Ok(chunk_page_indices) => {
+					num_remaining -= current_pow_2;
+					page_indices.extend(chunk_page_indices);
+				}
+				Err(()) => {
+					let old_pow_2 = current_pow_2;
+					current_pow_2 = old_pow_2 >> 1;
+					trace!(
+						"Failed to allocate new chunk of {old_pow_2} pages to fill the balloon with, reducing chunk size to {current_pow_2}"
+					);
+
+					continue;
+				}
+			}
+		}
+
+		page_indices
+	}
+
+	pub fn mark_pages_for_deflation(
+		&mut self,
+		target_num_pages: u32,
+	) -> Vec<Vec<u32, DeviceAlloc>, DeviceAlloc> {
+		let mut num_remaining = target_num_pages;
+		let mut per_chunk_page_indices = Vec::new_in(DeviceAlloc);
+
+		// Go through chunks from small/recent to large/old, mark as much as requested if possible.
+		// Collect the page indices of marked pages for submission to the deflate queue.
+
+		for chunk in self.chunks.iter_mut().rev() {
+			let num_to_mark = chunk.num_available_for_deflation().min(num_remaining);
+
+			let mut page_indices = Vec::new_in(DeviceAlloc);
+			chunk
+				.mark_queued_for_deflation(num_to_mark)
+				.collect_into(&mut page_indices);
+
+			per_chunk_page_indices.push(page_indices);
+
+			num_remaining -= num_to_mark;
+
+			if num_remaining == 0 {
+				break;
+			}
+		}
+
+		if num_remaining > 0 {
+			warn!(
+				"Attempted to deflate more pages than were in the balloon: no more allocation chunks left to deflate"
+			);
+		}
+
+		per_chunk_page_indices
+	}
+
+	pub unsafe fn shrink_chunks(
+		&mut self,
+		talc: &mut Talc<HermitOomHandler>,
+		acknowledged_deflated_pages: Vec<Vec<u32, DeviceAlloc>, DeviceAlloc>,
+	) {
+		let mut next_chunk_index = self.chunks.len().checked_sub(1);
+
+		for chunk_deflated_pages in acknowledged_deflated_pages.into_iter() {
+			let Some(mut current_chunk_index) = next_chunk_index else {
+				error!(
+					"Was unable to use all page indices acknowledged for deflation to shrink allocation chunks"
+				);
+				return;
+			};
+
+			loop {
+				if self.chunks[current_chunk_index].can_shrink_by_pages(&chunk_deflated_pages) {
+					break;
+				}
+
+				trace!(
+					"Skipped one chunk, because it cannot be shrunk by the current block of deflated pages"
+				);
+
+				let Some(new_chunk_index) = current_chunk_index.checked_sub(1) else {
+					error!(
+						"Was unable to use all page indices acknowledged for deflation to shrink allocation chunks"
+					);
+					return;
+				};
+
+				current_chunk_index = new_chunk_index;
+			}
+
+			// SAFETY: TODO
+			let shrink_res =
+				unsafe { self.chunks[current_chunk_index].shrink(talc, chunk_deflated_pages) };
+
+			match shrink_res {
+				ShrinkResult::PagesRemain => (),
+				ShrinkResult::Deallocated => {
+					self.chunks.remove(current_chunk_index);
+				}
+			}
+
+			next_chunk_index = current_chunk_index.checked_sub(1);
 		}
 	}
 }
 
-/// Represents the data inside a page and ensures alignment to 4K page boundaries
-/// as 4K pages are what the balloon device works with, exclusively.
-#[repr(align(4096))]
-struct BalloonPageData(
-	#[expect(
-		dead_code,
-		reason = "contents are owned by the host and should not be read by us"
-	)]
-	[u8; BASE_PAGE_SIZE],
-);
-
-impl Debug for BalloonPageData {
-	fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-		f.debug_tuple("BalloonPageData").finish_non_exhaustive()
-	}
-}
-
-/// Represents a 4K page allocated for the balloon.
+/// Represents a chunk of consecutive 4K pages allocated for the balloon.
 ///
 /// This ensures via encapsulation, that inflated pages, pages released to the host,
 /// are not read from / written to while they are in the balloon.
+///
+/// The allocation represented by this type must be manually deallocated via [`Self:deallocate`].
+/// If the type is dropped, the allocation is leaked.
+/// This is not unsafe, but undesirable.
 #[derive(Debug)]
-struct BalloonPage {
-	page_allocation: Box<MaybeUninit<BalloonPageData>>,
+struct BalloonAllocation {
+	allocation_ptr: Option<NonNull<u8>>,
+	page_indices: Vec<u32, DeviceAlloc>,
+	/// Contains page indices previously marked for deflation with [`Self::mark_queued_for_deflation`].
+	/// The order of page indices is the same as it was while the pages were still
+	/// in [`Self::page_indices`]. This means a newly marked block of page indices
+	/// is pushed to the front of the `VecDeque`, while shrinking pages removes
+	/// page indices from the back.
+	pages_queued_for_deflation: VecDeque<u32, DeviceAlloc>,
 }
 
-impl BalloonPage {
-	#[must_use = "this returns an object representing the allocation, unless stored, it is deallocated"]
-	pub fn allocate() -> Result<Self, AllocError> {
-		let page_allocation = Box::try_new_uninit()?;
+// SAFETY: `BalloonAllocation` does not implement `Clone` (or any other cloning mechanism)
+// and implies exclusive ownership of an allocation, with the exception of host ineractions.
+// Sending it across threads cannot create a situation where we can access
+// mutable state across two threads. The host interactions are guarded by
+// unsafe functions and in general we don't dereference pointers into our allocation.
+unsafe impl Send for BalloonAllocation {}
 
-		Ok(Self { page_allocation })
+// SAFETY: We don't allow for any interior mutability as `allocation_ptr` is never
+// dereferenced by us and is not exposed outside of our type. Other than that we
+// only have plain integer types that are `Sync` themselves.
+unsafe impl Sync for BalloonAllocation {}
+
+impl BalloonAllocation {
+	/// Get the memory layout for an allocation of `num_pages` 4K pages
+	fn layout(num_pages: NonZeroUsize) -> Layout {
+		Layout::from_size_align(num_pages.get() * BALLOON_PAGE_SIZE, BALLOON_PAGE_SIZE).expect(
+			"Layout of a non-zero amount of 4K pages aligned to 4K page boundaries should be valid",
+		)
 	}
 
-	/// Compute the physical page index of the allocated page.
-	/// TODO: safety docs?
-	pub fn phys_page_index(&self) -> u32 {
-		let virtual_addr = VirtAddr::from(self.page_allocation.as_ptr().expose_provenance());
-
-		let physical_addr = virtual_to_physical(virtual_addr)
-			.expect("We only deal with virtual addresses that are mapped");
-
-		physical_addr
-			.as_u64()
-			.checked_div(BASE_PAGE_SIZE as u64)
-			.expect("Pointer to start of allocated balloon page should be base page size aligned")
-			as u32
+	/// The current layout of our allocation if we have any pages allocated,
+	/// `None` otherwise.
+	fn current_layout(&self) -> Option<Layout> {
+		self.num_pages_allocated().map(Self::layout)
 	}
+
+	/// The total number of pages allocated for this chunk.
+	/// This also includes pages marked for deflation that haven't been shrunk away yet.
+	fn num_pages_allocated(&self) -> Option<NonZeroUsize> {
+		NonZeroUsize::new(self.page_indices.len() + self.pages_queued_for_deflation.len())
+	}
+
+	/// The number of pages of this chunk that can be queued for deflation.
+	fn num_available_for_deflation(&self) -> u32 {
+		self.page_indices.len().try_into().expect(
+			"We only deal with 32-bit indexed pages, so our number of pages has to fit in a u32",
+		)
+	}
+
+	pub fn is_empty(&self) -> bool {
+		self.allocation_ptr.is_none()
+	}
+
+	pub fn phys_page_indices(&self) -> impl Iterator<Item = u32> {
+		self.page_indices.iter().copied()
+	}
+
+	#[must_use = "this returns an object representing the allocation, unless stored, it is leaked"]
+	pub fn try_allocate(
+		talc: &mut Talc<HermitOomHandler>,
+		num_pages: NonZeroU32,
+	) -> Result<Self, ()> {
+		// SAFETY: We require a non-zero number of pages, from which we construct
+		//         a non-zero-sized layout of this many 4K pages.
+		let allocation_ptr = unsafe {
+			talc.try_malloc(Self::layout(num_pages.try_into().expect(
+				"We don't support 16-bit or narrower platforms so a u32 should fit into a usize",
+			)))
+		}?;
+
+		// FIXME: handle Vec allocation failure, deallocating the balloon chunk
+
+		let num_pages = num_pages.get() as usize;
+
+		let mut page_indices = Vec::with_capacity_in(num_pages, DeviceAlloc);
+		(0..num_pages)
+			.map(|offset| VirtAddr::from_ptr(allocation_ptr.as_ptr()) + offset)
+			.map(|virt_addr| {
+				virtual_to_physical(virt_addr)
+					.expect("We only deal with virtual addresses that are mapped")
+			})
+			.map(|phys_addr| {
+				u32::try_from(phys_addr.as_u64() / BALLOON_PAGE_SIZE as u64)
+					.expect("Balloon cannot handle physical pages above 16TiB")
+			})
+			.collect_into(&mut page_indices);
+
+		Ok(Self {
+			allocation_ptr: Some(allocation_ptr),
+			page_indices,
+			// TODO: can we not reserve this up-front?
+			pages_queued_for_deflation: VecDeque::with_capacity_in(num_pages, DeviceAlloc),
+		})
+	}
+
+	pub fn mark_queued_for_deflation(
+		&mut self,
+		num_pages_to_mark: u32,
+	) -> impl Iterator<Item = u32> {
+		assert!(
+			num_pages_to_mark as usize <= self.page_indices.len(),
+			"Cannot mark mark more pages for deflation than are still contained in the chunk"
+		);
+
+		let num_previously_marked = self.pages_queued_for_deflation.len();
+
+		// Move newly marked block of page indices to front of `pages_queued_for_deflation`
+		// while maintaining the order of the indices.
+		for page_index in self
+			.page_indices
+			.drain(self.page_indices.len() - num_pages_to_mark as usize..self.page_indices.len())
+			.rev()
+		{
+			self.pages_queued_for_deflation.push_front(page_index);
+		}
+
+		self.pages_queued_for_deflation
+			.iter()
+			.copied()
+			.skip(num_previously_marked)
+			.take(num_pages_to_mark as usize)
+	}
+
+	pub fn can_shrink_by_pages(&self, page_indices: &[u32]) -> bool {
+		self.pages_queued_for_deflation
+			.iter()
+			.rev()
+			.zip(page_indices.iter().rev())
+			.all(|(marked, deflated)| *marked == *deflated)
+	}
+
+	/// Shrinks the allocated chunk by `pages_to_shrink`.
+	/// Takes `self` by value and if there are remaining pages in the chunks after
+	/// shrinking, returns it via [`ShrinkResult::PagesRemain`]. Otherwise `self`
+	/// is consumed with the chunk having been emptied.
+	///
+	/// `pages_to_shrink` should be a list of page indices previously returned by
+	/// [`Self::mark_queued_for_deflation`]. They should be submitted in the order
+	/// they were returned by [`Self::mark_queued_for_deflation`] both within such
+	/// a list and across multiple calls of this function with different lists.
+	/// This ensure we can actually shrink our allocation.
+	///
+	/// # Safety
+	/// Must be called with the same instance of [`Talc`] that was provided to
+	/// [`Self::try_allocate`] to create this instance of [`BalloonAllocation`].
+	///
+	/// Must not be called while the host still has ownership of any of the pages
+	/// that are a part of the allocation represented by this struct.
+	/// I.e. deallocation may only take place once the host has returned ownership
+	/// back to us for all pages of this allocation.
+	///
+	/// # Panics
+	/// If `pages_to_shrink` contains page indices of pages not marked queued for deflation
+	#[must_use = "If pages remain after shrinking, remaining BalloonAllocation is returned. Dropping it would leak the allocation"]
+	pub unsafe fn shrink(
+		&mut self,
+		talc: &mut Talc<HermitOomHandler>,
+		pages_to_shrink: Vec<u32, DeviceAlloc>,
+	) -> ShrinkResult {
+		assert!(
+			pages_to_shrink.len() <= self.pages_queued_for_deflation.len(),
+			"Must mark the amount of the allocation chunk to be shrunk for deflation before shrinking"
+		);
+
+		if self.is_empty() {
+			warn!("Attempted to shrink already empty balloon allocation chunk");
+			return ShrinkResult::Deallocated;
+		}
+
+		if pages_to_shrink.is_empty() {
+			return ShrinkResult::PagesRemain;
+		}
+
+		let old_layout = self
+			.current_layout()
+			.expect("We checked above that we have at least one page still allocated");
+
+		let Some(first_to_shrink) = self
+			.pages_queued_for_deflation
+			.iter()
+			.find(|page_index| **page_index == pages_to_shrink[0])
+			.copied()
+		else {
+			error!(
+				"First page to shrink ({}) was not found inside balloon allocation chunk, can't shrink",
+				pages_to_shrink[0]
+			);
+			panic!("Attempted to shrink balloon allocation chunk by page not inside the chunk")
+		};
+
+		if self
+			.pages_queued_for_deflation
+			.back()
+			.is_some_and(|page_index| {
+				page_index
+					== pages_to_shrink
+						.last()
+						.expect("We checked for non-emptiness above")
+			}) {
+			error!(
+				"Last page to shrink {} was not found inside balloon allocation chunk, can't shrink",
+				pages_to_shrink
+					.last()
+					.expect("We checked for non-emptiness above")
+			);
+			panic!(
+				"Attempted to shrink balloon allocation chunk by pages not consecutively at the end of the chunk"
+			)
+		}
+
+		for (page_index_to_shrink, page_index_marked) in pages_to_shrink.into_iter().zip(
+			self.pages_queued_for_deflation
+				.drain(first_to_shrink as usize..),
+		) {
+			assert!(
+				page_index_to_shrink == page_index_marked,
+				"Attempted to shrink balloon allocation chunk by page not inside the chunk"
+			);
+		}
+
+		let new_num_pages = self.page_indices.len() + self.pages_queued_for_deflation.len();
+
+		if new_num_pages == 0 {
+			// SAFETY: TODO
+			unsafe {
+				talc.free(
+					self.allocation_ptr
+						.take()
+						.expect("We checked above that we still have at least one page allocated"),
+					old_layout,
+				);
+			}
+
+			trace!(
+				"Deallocated balloon chunk as all its pages were shrunk away after acknowledged deflation"
+			);
+
+			ShrinkResult::Deallocated
+		} else {
+			// SAFETY: TODO
+			unsafe {
+				talc.shrink(
+					self.allocation_ptr
+						.expect("We checked above that we still have at least one page allocated"),
+					old_layout,
+					new_num_pages,
+				);
+			}
+
+			trace!(
+				"Shrunk balloon chunk with {} pages still remaining and an additional {} pages marked queued for deflation",
+				self.page_indices.len(),
+				self.pages_queued_for_deflation.len()
+			);
+
+			ShrinkResult::PagesRemain
+		}
+	}
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShrinkResult {
+	PagesRemain,
+	Deallocated,
 }
