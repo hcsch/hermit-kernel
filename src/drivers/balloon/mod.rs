@@ -600,26 +600,29 @@ impl BalloonMap {
 		let mut current_pow_2 = target_num_pages.ilog2();
 		let mut num_remaining = target_num_pages;
 
-		loop {
-			let Some(current_pow_2_nz) = NonZeroU32::new(current_pow_2) else {
-				if num_remaining > 0 {
-					warn!(
-						"Failed to allocate new pages to fill the balloon with, continuing with as many as possible"
-					);
-				}
-				break;
-			};
-
-			match self.allocate_chunk(talc, current_pow_2_nz) {
+		while num_remaining > 0 {
+			match self.allocate_chunk(
+				talc,
+				NonZeroU32::new(1 << current_pow_2)
+					.expect("One shifted left by any number is always at least one"),
+			) {
 				Ok(chunk_page_indices) => {
-					num_remaining -= current_pow_2;
+					num_remaining -= 1 << current_pow_2;
 					page_indices.extend(chunk_page_indices);
 				}
 				Err(()) => {
+					if current_pow_2 == 0 {
+						warn!(
+							"Failed to allocate as many pages as requested to fill the balloon with, continuing with as many as possible ({})",
+							target_num_pages - num_remaining
+						);
+						break;
+					}
+
 					let old_pow_2 = current_pow_2;
 					current_pow_2 = old_pow_2 >> 1;
 					trace!(
-						"Failed to allocate new chunk of {old_pow_2} pages to fill the balloon with, reducing chunk size to {current_pow_2}"
+						"Failed to allocate new chunk of 2^{old_pow_2} pages to fill the balloon with, reducing chunk size to 2^{current_pow_2}"
 					);
 
 					continue;
