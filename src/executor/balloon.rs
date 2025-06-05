@@ -7,7 +7,12 @@ use crate::executor::spawn;
 async fn balloon_run() {
 	future::poll_fn(|_cx| {
 		if let Some(driver) = pci::get_balloon_driver() {
-			let mut driver_guard = driver.lock();
+			let Some(mut driver_guard) = driver.try_lock() else {
+				debug!(
+					"Balloon driver was polled while the driver was locked elsewhere, doing nothing"
+				);
+				return Poll::Pending;
+			};
 
 			driver_guard.poll_events();
 
