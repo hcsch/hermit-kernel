@@ -233,6 +233,8 @@ impl VirtioBalloonDriver {
 			"Can't deflate more pages than there are in the balloon"
 		);
 
+		trace!("<balloon> Attempting to deflate by {num_pages_to_deflate} pages");
+
 		let page_indices = self
 			.balloon_map
 			.mark_pages_for_deflation(num_pages_to_deflate);
@@ -261,7 +263,11 @@ impl VirtioBalloonDriver {
 	}
 
 	fn inflate(&mut self, talc: &mut Talc<HermitOomHandler>, num_pages_to_inflate: u32) {
+		trace!("<balloon> Attempting to inflate by {num_pages_to_inflate} pages");
+
 		let page_indices = self.balloon_map.allocate_chunks(talc, num_pages_to_inflate);
+
+		trace!("<balloon> Sending page indices into inflateq");
 
 		// SAFETY: We ensure with our balloon map that we only inflate pages
 		//         that we have allocated via the global allocator. Inflating
@@ -293,6 +299,7 @@ impl VirtioBalloonDriver {
 			);
 
 			self.deflate(&mut ALLOCATOR.inner().lock(), num_to_deflate);
+			trace!("<balloon> Done deflating");
 		} else if new_target_num_pages > self.num_in_balloon + self.num_pending_inflation {
 			let num_to_inflate =
 				new_target_num_pages - (self.num_in_balloon + self.num_pending_inflation);
@@ -303,6 +310,7 @@ impl VirtioBalloonDriver {
 			);
 
 			self.inflate(&mut ALLOCATOR.inner().lock(), num_to_inflate);
+			trace!("<balloon> Done inflating");
 		}
 	}
 
@@ -507,10 +515,14 @@ impl BalloonVq {
 		page_indices: I,
 		notif: bool,
 	) -> Result<(), VirtqError> {
+		trace!("<balloon> Sending page indices into queue");
+
 		let Some(vq) = &mut self.vq else {
 			error!("BalloonVq::send_pages called on uninitialized vq");
 			panic!("BalloonVq must be initialized before calling send_pages");
 		};
+
+		trace!("<balloon> Allocating new Vec (DeviceAlloc) for page indices");
 
 		let mut page_indices_bytes = Vec::new_in(DeviceAlloc);
 		page_indices
@@ -524,6 +536,8 @@ impl BalloonVq {
 			smallvec![],
 		)
 		.expect("We have specified a send_buff so AvailBufferToken::new should succeed");
+
+		trace!("<balloon> Dispatching buffer to the queue");
 
 		vq.dispatch(buff_tkn, notif, BufferType::Direct)?;
 
@@ -600,7 +614,13 @@ impl BalloonMap {
 		let mut current_pow_2 = target_num_pages.ilog2();
 		let mut num_remaining = target_num_pages;
 
+		trace!("<balloon> Attempting to allocate {target_num_pages} pages");
+
 		while num_remaining > 0 {
+			trace!(
+				"<balloon> Attempting to allocate chunk of {} pages (pages remaining: {num_remaining})",
+				1 << current_pow_2
+			);
 			match self.allocate_chunk(
 				talc,
 				NonZeroU32::new(1 << current_pow_2)
@@ -630,6 +650,8 @@ impl BalloonMap {
 			}
 		}
 
+		trace!("<balloon> Done allocating chunks");
+
 		page_indices
 	}
 
@@ -637,6 +659,8 @@ impl BalloonMap {
 		&mut self,
 		target_num_pages: u32,
 	) -> Vec<Vec<u32, DeviceAlloc>, DeviceAlloc> {
+		trace!("<balloon> Attempting to mark {target_num_pages} pages as queued for deflation");
+
 		let mut num_remaining = target_num_pages;
 		let mut per_chunk_page_indices = Vec::new_in(DeviceAlloc);
 
