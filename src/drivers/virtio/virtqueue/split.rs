@@ -28,7 +28,7 @@ use crate::mm::device_alloc::DeviceAlloc;
 
 struct DescrRing {
 	read_idx: u16,
-	token_ring: Box<[Option<Box<TransferToken<virtq::Desc>>>]>,
+	token_ring: Box<[Option<TransferToken<virtq::Desc>>]>,
 	mem_pool: MemPool,
 
 	/// Descriptor Tables
@@ -95,7 +95,7 @@ impl DescrRing {
 
 		trace!("<vq:split> Inserting transfer token into token ring");
 
-		self.token_ring[usize::from(index)] = Some(Box::new(tkn));
+		self.token_ring[usize::from(index)] = Some(tkn);
 
 		trace!("<vq:split> Updating available ring");
 
