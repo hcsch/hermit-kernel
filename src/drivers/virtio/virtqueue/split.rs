@@ -59,12 +59,20 @@ impl DescrRing {
 	fn push(&mut self, tkn: TransferToken<virtq::Desc>) -> Result<u16, VirtqError> {
 		let mut index;
 		if let Some(ctrl_desc) = tkn.ctrl_desc.as_ref() {
+			trace!("<vq:split> Creating indirect descriptor");
 			let descriptor = SplitVq::indirect_desc(ctrl_desc.as_ref());
+
+			trace!("<vq:split> Attempting to assign descriptor to free slot in table");
 
 			index = self.mem_pool.pool.pop().ok_or(VirtqError::NoDescrAvail)?.0;
 			self.descr_table_mut()[usize::from(index)] = MaybeUninit::new(descriptor);
 		} else {
+			trace!("<vq:split> Creating direct descriptor iterator");
 			let mut rev_all_desc_iter = SplitVq::descriptor_iter(&tkn.buff_tkn)?.rev();
+
+			trace!(
+				"<vq:split> Attempting to assign descriptors to free slots in table in reverse order"
+			);
 
 			// We need to handle the last descriptor (the first for the reversed iterator) specially to not set the next flag.
 			{
@@ -85,7 +93,11 @@ impl DescrRing {
 			// thus the head of the descriptor chain.
 		}
 
+		trace!("<vq:split> Inserting transfer token into token ring");
+
 		self.token_ring[usize::from(index)] = Some(Box::new(tkn));
+
+		trace!("<vq:split> Updating available ring");
 
 		let len = self.token_ring.len();
 		let idx = self.avail_ring_mut().idx.to_ne();
@@ -193,7 +205,9 @@ impl Virtq for SplitVq {
 		notif: bool,
 		buffer_type: BufferType,
 	) -> Result<(), VirtqError> {
+		trace!("<vq:split> Creating transfer token");
 		let transfer_tkn = Self::transfer_token_from_buffer_token(buffer_tkn, buffer_type);
+		trace!("<vq:split> Pushing to descriptor ring transfer token");
 		let next_idx = self.ring.push(transfer_tkn)?;
 
 		if notif {
