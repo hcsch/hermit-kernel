@@ -28,7 +28,7 @@ use crate::mm::device_alloc::DeviceAlloc;
 
 struct DescrRing {
 	read_idx: u16,
-	token_ring: Box<[Option<Box<TransferToken<virtq::Desc>>>]>,
+	token_ring: Box<[Option<TransferToken<virtq::Desc>>]>,
 	mem_pool: MemPool,
 
 	/// Descriptor Tables
@@ -95,7 +95,7 @@ impl DescrRing {
 
 		trace!("<vq:split> Inserting transfer token into token ring");
 
-		self.token_ring[usize::from(index)] = Some(Box::new(tkn));
+		self.token_ring[usize::from(index)] = Some(tkn);
 
 		trace!("<vq:split> Updating available ring");
 
@@ -205,6 +205,12 @@ impl Virtq for SplitVq {
 		notif: bool,
 		buffer_type: BufferType,
 	) -> Result<(), VirtqError> {
+		// IMPORTANT: This function may not allocate from GlobalAlloc if the
+		//            balloon device support has been enabled, as the inflate/deflate
+		//            operations operate with a locked global allocator and need
+		//            to send descriptors into their respective queues.
+		//            Allocating with the global allocator here would deadlock.
+
 		trace!("<vq:split> Creating transfer token");
 		let transfer_tkn = Self::transfer_token_from_buffer_token(buffer_tkn, buffer_type);
 		trace!("<vq:split> Pushing to descriptor ring transfer token");
