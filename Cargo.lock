@@ -719,7 +719,6 @@ dependencies = [
  "hermit-sync",
  "llvm-tools",
  "lock_api",
- "log",
  "memory_addresses",
  "num",
  "num-derive",
@@ -739,6 +738,9 @@ dependencies = [
  "talc",
  "time",
  "tock-registers 0.9.0",
+ "tracing",
+ "tracing-core",
+ "tracing-subscriber",
  "trapframe",
  "uart_16550",
  "uhyve-interface",
@@ -1685,6 +1687,31 @@ name = "tock-registers"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b9e2fdb3a1e862c0661768b7ed25390811df1947a8acbfbefe09b47078d93c4"
+
+[[package]]
+name = "tracing"
+version = "0.1.41"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "784e0ac535deb450455cbfa28a6f0df145ea1bb7ae51b821cf5e7927fdcfbdd0"
+dependencies = [
+ "pin-project-lite",
+ "tracing-core",
+]
+
+[[package]]
+name = "tracing-core"
+version = "0.1.33"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e672c95779cf947c5311f83787af4fa8fffd12fb27e4993211a84bdfd9610f9c"
+
+[[package]]
+name = "tracing-subscriber"
+version = "0.3.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8189decb5ac0fa7bc8b96b7cb9b2701d60d48805aca84a238004d665fcc4008"
+dependencies = [
+ "tracing-core",
+]
 
 [[package]]
 name = "trapframe"

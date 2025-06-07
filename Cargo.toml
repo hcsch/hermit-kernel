@@ -121,7 +121,9 @@ heapless = "0.8"
 hermit-entry = { version = "0.10", features = ["kernel"] }
 hermit-sync = "0.1"
 lock_api = "0.4"
-log = { version = "0.4", default-features = false }
+tracing-core = { version = "0.1.33", default-features = false }
+tracing = { version = "0.1.41", default-features = false }
+tracing-subscriber = { version = "0.3.19", default-features = false, features = ["alloc"] }
 num = { version = "0.4", default-features = false }
 num-derive = "0.4"
 num-traits = { version = "0.2", default-features = false }

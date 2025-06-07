@@ -31,7 +31,10 @@
 	reexport_test_harness_main = "test_main"
 )]
 #![cfg_attr(all(target_os = "none", test), no_main)]
-#![cfg_attr(feature = "balloon", feature(iter_collect_into, array_chunks, iter_array_chunks))]
+#![cfg_attr(
+	feature = "balloon",
+	feature(iter_collect_into, array_chunks, iter_array_chunks)
+)]
 
 // EXTERNAL CRATES
 #[macro_use]
@@ -39,7 +42,7 @@ extern crate alloc;
 #[macro_use]
 extern crate bitflags;
 #[macro_use]
-extern crate log;
+extern crate tracing;
 #[cfg(not(target_os = "none"))]
 #[macro_use]
 extern crate std;
