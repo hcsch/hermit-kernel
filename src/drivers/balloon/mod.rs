@@ -299,8 +299,8 @@ impl VirtioBalloonDriver {
 				(self.num_in_balloon - self.num_pending_deflation) - new_target_num_pages;
 
 			info!(
-				"<balloon> Size change requested: deflate of {num_to_deflate}, from {} (with {} pending deflation) to {new_target_num_pages}",
-				self.num_in_balloon, self.num_pending_deflation
+				"<balloon> Size change requested: deflate of {num_to_deflate}, from {} (with pending: inflation={} deflation={}) to {new_target_num_pages}",
+				self.num_in_balloon, self.num_pending_inflation, self.num_pending_deflation
 			);
 
 			self.deflate(&mut ALLOCATOR.inner().lock(), num_to_deflate);
@@ -310,8 +310,8 @@ impl VirtioBalloonDriver {
 				new_target_num_pages - (self.num_in_balloon + self.num_pending_inflation);
 
 			info!(
-				"<balloon> Size change requested: inflate of {num_to_inflate}, from {} (with {} pending inflation) to {new_target_num_pages}",
-				self.num_in_balloon, self.num_pending_inflation
+				"<balloon> Size change requested: inflate of {num_to_inflate}, from {} (with pending: inflation={} deflation={}) to {new_target_num_pages}",
+				self.num_in_balloon, self.num_pending_inflation, self.num_pending_deflation
 			);
 
 			self.inflate(&mut ALLOCATOR.inner().lock(), num_to_inflate);
@@ -654,7 +654,7 @@ impl BalloonStorage {
 			}
 		}
 
-		trace!("<balloon> Done allocating chunks");
+		trace!("<balloon> Done allocating {} chunks", page_indices.len());
 
 		page_indices
 	}
