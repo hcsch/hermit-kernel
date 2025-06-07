@@ -951,8 +951,7 @@ impl BalloonAllocation {
 		let Some(first_to_shrink) = self
 			.pages_queued_for_deflation
 			.iter()
-			.find(|page_index| **page_index == pages_to_shrink[0])
-			.copied()
+			.position(|page_index| *page_index == pages_to_shrink[0])
 		else {
 			error!(
 				"<balloon> First page to shrink ({}) was not found inside balloon allocation chunk, can't shrink",
@@ -981,10 +980,10 @@ impl BalloonAllocation {
 			)
 		}
 
-		for (page_index_to_shrink, page_index_marked) in pages_to_shrink.into_iter().zip(
-			self.pages_queued_for_deflation
-				.drain(first_to_shrink as usize..),
-		) {
+		for (page_index_to_shrink, page_index_marked) in pages_to_shrink
+			.into_iter()
+			.zip(self.pages_queued_for_deflation.drain(first_to_shrink..))
+		{
 			assert!(
 				page_index_to_shrink == page_index_marked,
 				"Attempted to shrink balloon allocation chunk by page not inside the chunk"
