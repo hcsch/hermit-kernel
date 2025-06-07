@@ -270,6 +270,7 @@ impl VirtioBalloonDriver {
 		let page_indices = self
 			.balloon_storage
 			.allocate_chunks(talc, num_pages_to_inflate);
+		let num_pages_inflated = page_indices.len();
 
 		trace!("<balloon> Sending page indices into inflateq");
 
@@ -284,7 +285,7 @@ impl VirtioBalloonDriver {
 				.expect("Failed to send pages into the inflateq");
 		}
 
-		self.num_pending_inflation += num_pages_to_inflate;
+		self.num_pending_inflation += num_pages_inflated as u32;
 	}
 
 	fn adjust_balloon_size(&mut self) {
