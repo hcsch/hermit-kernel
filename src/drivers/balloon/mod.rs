@@ -1029,7 +1029,7 @@ impl BalloonAllocation {
 					self.allocation_ptr
 						.expect("We checked above that we still have at least one page allocated"),
 					old_layout,
-					new_num_pages,
+					new_num_pages * BALLOON_PAGE_SIZE,
 				);
 			}
 
