@@ -861,6 +861,13 @@ impl BalloonAllocation {
 
 		let num_previously_marked = self.pages_queued_for_deflation.len();
 
+		trace!(
+			"<balloon> Marking {num_pages_to_mark} pages for chunk {} ({num_previously_marked} marked for deflation) -> {} ({} marked for deflation)",
+			self.page_indices.len(),
+			self.page_indices.len() - num_pages_to_mark as usize,
+			num_previously_marked + num_pages_to_mark as usize
+		);
+
 		// Move newly marked block of page indices to front of `pages_queued_for_deflation`
 		// while maintaining the order of the indices.
 		for page_index in self
@@ -928,6 +935,15 @@ impl BalloonAllocation {
 			return ShrinkResult::PagesRemain;
 		}
 
+		trace!(
+			"<balloon> Shrinking chunk by {} pages {} ({} marked for deflation) -> {} ({} marked for deflation)",
+			pages_to_shrink.len(),
+			self.page_indices.len(),
+			self.pages_queued_for_deflation.len(),
+			self.page_indices.len(),
+			self.pages_queued_for_deflation.len() - pages_to_shrink.len(),
+		);
+
 		let old_layout = self
 			.current_layout()
 			.expect("We checked above that we have at least one page still allocated");
@@ -977,7 +993,15 @@ impl BalloonAllocation {
 
 		let new_num_pages = self.page_indices.len() + self.pages_queued_for_deflation.len();
 
-		if new_num_pages == 0 {
+		let res = if new_num_pages == 0 {
+			trace!(
+				"<balloon> Deallocating balloon chunk as all its pages were shrunk away after acknowledged deflation"
+			);
+
+			trace!(
+				"<balloon> Freeing ptr={:x?}, layout={old_layout:?}",
+				self.allocation_ptr
+			);
 			// SAFETY: TODO
 			unsafe {
 				talc.free(
@@ -988,12 +1012,18 @@ impl BalloonAllocation {
 				);
 			}
 
-			trace!(
-				"<balloon> Deallocated chunk as all its pages were shrunk away after acknowledged deflation"
-			);
-
 			ShrinkResult::Deallocated
 		} else {
+			trace!(
+				"<balloon> Shrinking chunk with {} pages still remaining and an additional {} pages marked queued for deflation",
+				self.page_indices.len(),
+				self.pages_queued_for_deflation.len()
+			);
+
+			trace!(
+				"<balloon> shrinking ptr={:x?}, old_layout={old_layout:?}, len={new_num_pages}",
+				self.allocation_ptr
+			);
 			// SAFETY: TODO
 			unsafe {
 				talc.shrink(
@@ -1004,14 +1034,12 @@ impl BalloonAllocation {
 				);
 			}
 
-			trace!(
-				"<balloon> Shrunk chunk with {} pages still remaining and an additional {} pages marked queued for deflation",
-				self.page_indices.len(),
-				self.pages_queued_for_deflation.len()
-			);
-
 			ShrinkResult::PagesRemain
-		}
+		};
+
+		trace!("<balloon> Done shrinking");
+
+		res
 	}
 }
 
