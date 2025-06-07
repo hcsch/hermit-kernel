@@ -960,7 +960,7 @@ impl BalloonAllocation {
 			panic!("Attempted to shrink balloon allocation chunk by page not inside the chunk")
 		};
 
-		if self
+		if !self
 			.pages_queued_for_deflation
 			.back()
 			.is_some_and(|page_index| {
