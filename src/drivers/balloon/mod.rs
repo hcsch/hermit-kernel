@@ -229,7 +229,17 @@ impl VirtioBalloonDriver {
 		}
 	}
 
-	fn deflate(&mut self, talc: &mut Talc<HermitOomHandler>, num_pages_to_deflate: u32) {
+	/// Deflate the balloon by the given number of pages.
+	///
+	/// # Panics
+	/// When `num_pages_to_deflate` is larger than the number of pages currently
+	/// deflatable in the balloon. That is all pages currently in the balloon,
+	/// minus the number of pages already queued for deflation.
+	///
+	/// # Safety
+	/// Must be called with the same instance of [`Talc`] that was provided to
+	/// [`Self::inflate`] to inflate the balloon.
+	unsafe fn deflate(&mut self, talc: &mut Talc<HermitOomHandler>, num_pages_to_deflate: u32) {
 		assert!(
 			num_pages_to_deflate <= self.num_in_balloon - self.num_pending_deflation,
 			"Can't deflate more pages than there are in the balloon"
@@ -257,6 +267,8 @@ impl VirtioBalloonDriver {
 		// SAFETY: For now we don't have [`F::MUST_TELL_HOST`] support, so
 		//         we can deallocate all pages immediately once we have sent
 		//         them into the deflateq. See VIRTIO v1.2 5.5.6 3.
+		//         We pass on the upholding of the requirements on the `Talc`
+		//         instance used to our caller.
 		unsafe {
 			self.balloon_storage.shrink_chunks(talc, page_indices);
 		}
@@ -304,7 +316,11 @@ impl VirtioBalloonDriver {
 				self.num_in_balloon, self.num_pending_inflation, self.num_pending_deflation
 			);
 
-			self.deflate(&mut ALLOCATOR.inner().lock(), num_to_deflate);
+			// SAFETY: We always use the one global instance of `Talc` Hermit uses
+			//         as its global allocator, both for inflating and deflating.
+			unsafe {
+				self.deflate(&mut ALLOCATOR.inner().lock(), num_to_deflate);
+			}
 			trace!("<balloon> Done deflating");
 		} else if new_target_num_pages > self.num_in_balloon + self.num_pending_inflation {
 			let num_to_inflate =
@@ -336,7 +352,14 @@ impl VirtioBalloonDriver {
 			.saturating_sub(self.num_pending_deflation)
 	}
 
-	pub fn deflate_for_oom(
+	/// Deflate the balloon in case of an out-of-memory (OOM) event.
+	/// This is meant to be called from a [`talc::OomHandler`] registered to Hermit's
+	/// global instance of [`Talc`].
+	///
+	/// # Safety
+	/// May only be called with the one [`Talc`] instance registered as the global
+	/// allocator for Hermit.
+	pub unsafe fn deflate_for_oom(
 		&mut self,
 		talc: &mut Talc<HermitOomHandler>,
 		failed_alloc_num_pages: u32,
@@ -357,7 +380,11 @@ impl VirtioBalloonDriver {
 				"<balloon> Deflating {num_to_deflate} pages in an attempt to recover from an OOM condition"
 			);
 
-			self.deflate(talc, num_to_deflate);
+			// SAFETY: We pass on the requirement of using the correct `Talc`
+			//         instance to our caller.
+			unsafe {
+				self.deflate(talc, num_to_deflate);
+			}
 			Ok(())
 		} else {
 			error!("<balloon> Unable to deflate balloon further");
@@ -698,6 +725,20 @@ impl BalloonStorage {
 		per_chunk_page_indices
 	}
 
+	/// Shrink chunks previously marked partially or fully as queued for deflation previously.
+	/// The chunks will be shrunk only by the pages the indices of which are provided
+	/// in `acknowledged_deflated_pages`. The indices should be provided in the
+	/// groups and order they were returned by [`Self::allocate_chunks`].
+	///
+	/// # Safety
+	/// Must be called with the same instance of [`Talc`] that was provided to
+	/// [`Self::allocate_chunks`] to allocate the chunks. This should be the same
+	/// [`Talc`] instance for all chunks.
+	///
+	/// Must not be called with page indices that the host still has ownership of.
+	/// That is, only page indices to pages that are already deflated may be passed
+	/// to this function. Otherwise pages still owned by the host may be freed,
+	/// leading to unsound future allocations.
 	pub unsafe fn shrink_chunks(
 		&mut self,
 		talc: &mut Talc<HermitOomHandler>,
@@ -732,7 +773,8 @@ impl BalloonStorage {
 				current_chunk_index = new_chunk_index;
 			}
 
-			// SAFETY: TODO
+			// SAFETY: We pass on the upholding of the requirements on the `Talc`
+			//         instance passed and the page indices provided to our caller.
 			let shrink_res =
 				unsafe { self.chunks[current_chunk_index].shrink(talc, chunk_deflated_pages) };
 
@@ -1002,7 +1044,15 @@ impl BalloonAllocation {
 				"<balloon> Freeing ptr={:x?}, layout={old_layout:?}",
 				self.allocation_ptr
 			);
-			// SAFETY: TODO
+			// SAFETY: We require that our caller ensures that the same `Talc`
+			//         instance is passed here as the one passed to allocate our
+			//         `BalloonAllocation`. As we don't expose our pointer, or
+			//         allow other modification from outside, it must have been
+			//         allocated with the given `Talc` instance.
+			//         We track the size of our allocation beginning with the intial
+			//         allocation and also during shrinking operations. Our alignment
+			//         is always to 4K page boundaries. We thus ensure the correct
+			//         layout is passed here.
 			unsafe {
 				talc.free(
 					self.allocation_ptr
@@ -1024,7 +1074,19 @@ impl BalloonAllocation {
 				"<balloon> shrinking ptr={:x?}, old_layout={old_layout:?}, len={new_num_pages}",
 				self.allocation_ptr
 			);
-			// SAFETY: TODO
+			// SAFETY: We require that our caller ensures that the same `Talc`
+			//         instance is passed here as the one passed to allocate our
+			//         `BalloonAllocation`. As we don't expose our pointer, or
+			//         allow other modification from outside, it must have been
+			//         allocated with the given `Talc` instance.
+			//         We track the size of our allocation beginning with the intial
+			//         allocation and also during shrinking operations. Our alignment
+			//         is always to 4K page boundaries. We thus ensure the correct
+			//         old layout is passed here.
+			//         This branch cannout be reached if the new size is zero.
+			//         The size can also not be larger than the old size, as we
+			//         take a non-negative amount to shrink by as our parameter,
+			//         not a new size.
 			unsafe {
 				talc.shrink(
 					self.allocation_ptr

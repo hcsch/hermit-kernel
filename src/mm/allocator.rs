@@ -24,9 +24,14 @@ impl LockedAllocator {
 		Self(Talc::new(ErrOnOom).lock())
 	}
 
+	/// # Safety
+	/// May only be used to construct the allocator that will be used as the
+	/// global allocator.
 	#[cfg(feature = "balloon")]
-	pub const fn new() -> Self {
-		Self(Talc::new(DeflateBalloonOnOom).lock())
+	pub const unsafe fn new() -> Self {
+		// SAFETY: We pass on the requirement of usage being restricted to only
+		//         the one global allocator to our caller.
+		Self(Talc::new(unsafe { DeflateBalloonOnOom::new() }).lock())
 	}
 
 	#[inline]
