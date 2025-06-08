@@ -1,5 +1,4 @@
 use alloc::boxed::Box;
-use alloc::collections::vec_deque::VecDeque;
 use alloc::vec::Vec;
 use core::alloc::Layout;
 use core::fmt::Debug;
@@ -800,14 +799,16 @@ impl BalloonStorage {
 /// This is not unsafe, but undesirable.
 #[derive(Debug)]
 struct BalloonAllocation {
+	/// Pointer to the allocation or `None` if fully deallocated.
 	allocation_ptr: Option<NonNull<u8>>,
+	/// Indices of the pages currently allocated and owned by this struct.
 	page_indices: Vec<u32, DeviceAlloc>,
-	/// Contains page indices previously marked for deflation with [`Self::mark_queued_for_deflation`].
-	/// The order of page indices is the same as it was while the pages were still
-	/// in [`Self::page_indices`]. This means a newly marked block of page indices
-	/// is pushed to the front of the `VecDeque`, while shrinking pages removes
-	/// page indices from the back.
-	pages_queued_for_deflation: VecDeque<u32, DeviceAlloc>,
+	/// Index of the first index that is queued for deflation, with all following
+	/// also being queued for deflation.
+	/// This is an index into [`Self::page_indices`].
+	/// When there are no pages queued for deflation, this index is the one after
+	/// the last element of [`Self::page_indices`], i.e. the length of [`Self::page_indices`].
+	queued_for_deflation_start: usize,
 }
 
 // SAFETY: `BalloonAllocation` does not implement `Clone` (or any other cloning mechanism)
@@ -839,14 +840,17 @@ impl BalloonAllocation {
 	/// The total number of pages allocated for this chunk.
 	/// This also includes pages marked for deflation that haven't been shrunk away yet.
 	fn num_pages_allocated(&self) -> Option<NonZeroUsize> {
-		NonZeroUsize::new(self.page_indices.len() + self.pages_queued_for_deflation.len())
+		NonZeroUsize::new(self.page_indices.len())
 	}
 
 	/// The number of pages of this chunk that can be queued for deflation.
 	fn num_available_for_deflation(&self) -> u32 {
-		self.page_indices.len().try_into().expect(
-			"We only deal with 32-bit indexed pages, so our number of pages has to fit in a u32",
-		)
+		(0..self.queued_for_deflation_start)
+			.len()
+			.try_into()
+			.expect(
+				"We only deal with 32-bit indexed pages, so our number of pages has to fit in a u32",
+			)
 	}
 
 	pub fn is_empty(&self) -> bool {
@@ -888,48 +892,41 @@ impl BalloonAllocation {
 		Ok(Self {
 			allocation_ptr: Some(allocation_ptr),
 			page_indices,
-			// TODO: can we not reserve this up-front?
-			pages_queued_for_deflation: VecDeque::with_capacity_in(num_pages, DeviceAlloc),
+			queued_for_deflation_start: num_pages,
 		})
+	}
+
+	fn pages_queued_for_deflation(&self) -> &[u32] {
+		&self.page_indices[self.queued_for_deflation_start..]
 	}
 
 	pub fn mark_queued_for_deflation(
 		&mut self,
 		num_pages_to_mark: u32,
 	) -> impl Iterator<Item = u32> {
+		let num_previously_marked = self.pages_queued_for_deflation().len();
+
 		assert!(
-			num_pages_to_mark as usize <= self.page_indices.len(),
-			"Cannot mark mark more pages for deflation than are still contained in the chunk"
+			num_pages_to_mark as usize <= self.page_indices.len() - num_previously_marked,
+			"Cannot mark mark more pages for deflation than are still contained and unmarked in the chunk"
 		);
 
-		let num_previously_marked = self.pages_queued_for_deflation.len();
+		let num_allocated = self.page_indices.len();
 
 		trace!(
-			"<balloon> Marking {num_pages_to_mark} pages for chunk {} ({num_previously_marked} marked for deflation) -> {} ({} marked for deflation)",
-			self.page_indices.len(),
-			self.page_indices.len() - num_pages_to_mark as usize,
+			"<balloon> Marking {num_pages_to_mark} pages for chunk: {num_allocated} (of that {num_previously_marked} marked for deflation) -> {num_allocated} (of that {} marked for deflation)",
 			num_previously_marked + num_pages_to_mark as usize
 		);
 
-		// Move newly marked block of page indices to front of `pages_queued_for_deflation`
-		// while maintaining the order of the indices.
-		for page_index in self
-			.page_indices
-			.drain(self.page_indices.len() - num_pages_to_mark as usize..self.page_indices.len())
-			.rev()
-		{
-			self.pages_queued_for_deflation.push_front(page_index);
-		}
+		self.queued_for_deflation_start -= num_pages_to_mark as usize;
 
-		self.pages_queued_for_deflation
+		self.pages_queued_for_deflation()[..num_pages_to_mark as usize]
 			.iter()
 			.copied()
-			.skip(num_previously_marked)
-			.take(num_pages_to_mark as usize)
 	}
 
 	pub fn can_shrink_by_pages(&self, page_indices: &[u32]) -> bool {
-		self.pages_queued_for_deflation
+		self.pages_queued_for_deflation()
 			.iter()
 			.rev()
 			.zip(page_indices.iter().rev())
@@ -964,8 +961,9 @@ impl BalloonAllocation {
 		talc: &mut Talc<HermitOomHandler>,
 		pages_to_shrink: Vec<u32, DeviceAlloc>,
 	) -> ShrinkResult {
+		let num_previously_marked = self.pages_queued_for_deflation().len();
 		assert!(
-			pages_to_shrink.len() <= self.pages_queued_for_deflation.len(),
+			pages_to_shrink.len() <= num_previously_marked,
 			"Must mark the amount of the allocation chunk to be shrunk for deflation before shrinking"
 		);
 
@@ -979,22 +977,26 @@ impl BalloonAllocation {
 		}
 
 		trace!(
-			"<balloon> Shrinking chunk by {} pages {} ({} marked for deflation) -> {} ({} marked for deflation)",
+			"<balloon> Shrinking chunk by {} pages: {} (of that {} marked for deflation) -> {} (of that {} marked for deflation)",
 			pages_to_shrink.len(),
 			self.page_indices.len(),
-			self.pages_queued_for_deflation.len(),
-			self.page_indices.len(),
-			self.pages_queued_for_deflation.len() - pages_to_shrink.len(),
+			num_previously_marked,
+			self.page_indices.len() - pages_to_shrink.len(),
+			num_previously_marked - pages_to_shrink.len(),
 		);
 
 		let old_layout = self
 			.current_layout()
 			.expect("We checked above that we have at least one page still allocated");
 
+		// Find the position in `self.page_indices` from which we want to start shrinking.
+		// Only look through the sub-slice of it that is actually marked queued for deflation
+		// to find the index.
 		let Some(first_to_shrink) = self
-			.pages_queued_for_deflation
+			.pages_queued_for_deflation()
 			.iter()
 			.position(|page_index| *page_index == pages_to_shrink[0])
+			.map(|index| self.queued_for_deflation_start + index)
 		else {
 			error!(
 				"<balloon> First page to shrink ({}) was not found inside balloon allocation chunk, can't shrink",
@@ -1004,8 +1006,9 @@ impl BalloonAllocation {
 		};
 
 		if !self
-			.pages_queued_for_deflation
-			.back()
+			.pages_queued_for_deflation()
+			.iter()
+			.last()
 			.is_some_and(|page_index| {
 				page_index
 					== pages_to_shrink
@@ -1025,7 +1028,7 @@ impl BalloonAllocation {
 
 		for (page_index_to_shrink, page_index_marked) in pages_to_shrink
 			.into_iter()
-			.zip(self.pages_queued_for_deflation.drain(first_to_shrink..))
+			.zip(self.page_indices.drain(first_to_shrink..))
 		{
 			assert!(
 				page_index_to_shrink == page_index_marked,
@@ -1033,7 +1036,7 @@ impl BalloonAllocation {
 			);
 		}
 
-		let new_num_pages = self.page_indices.len() + self.pages_queued_for_deflation.len();
+		let new_num_pages = self.page_indices.len();
 
 		let res = if new_num_pages == 0 {
 			trace!(
@@ -1065,9 +1068,9 @@ impl BalloonAllocation {
 			ShrinkResult::Deallocated
 		} else {
 			trace!(
-				"<balloon> Shrinking chunk with {} pages still remaining and an additional {} pages marked queued for deflation",
+				"<balloon> Shrinking chunk with {} pages still remaining of which {} pages marked queued for deflation",
 				self.page_indices.len(),
-				self.pages_queued_for_deflation.len()
+				self.pages_queued_for_deflation().len()
 			);
 
 			trace!(
