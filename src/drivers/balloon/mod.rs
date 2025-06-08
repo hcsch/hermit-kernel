@@ -642,7 +642,7 @@ impl BalloonStorage {
 		target_num_pages: u32,
 	) -> Vec<u32, DeviceAlloc> {
 		let mut page_indices = Vec::new_in(DeviceAlloc);
-		let mut current_pow_2 = target_num_pages.ilog2();
+		let mut current_exponent = target_num_pages.ilog2();
 		let mut num_remaining = target_num_pages;
 
 		trace!("<balloon> Attempting to allocate {target_num_pages} pages");
@@ -650,19 +650,19 @@ impl BalloonStorage {
 		while num_remaining > 0 {
 			trace!(
 				"<balloon> Attempting to allocate chunk of {} pages (pages remaining: {num_remaining})",
-				1 << current_pow_2
+				1u32 << current_exponent
 			);
 			match self.allocate_chunk(
 				talc,
-				NonZeroU32::new(1 << current_pow_2)
+				NonZeroU32::new(1 << current_exponent)
 					.expect("One shifted left by any number is always at least one"),
 			) {
 				Ok(chunk_page_indices) => {
-					num_remaining -= 1 << current_pow_2;
+					num_remaining -= 1 << current_exponent;
 					page_indices.extend(chunk_page_indices);
 				}
 				Err(()) => {
-					if current_pow_2 == 0 {
+					if current_exponent == 0 {
 						warn!(
 							"<balloon> Failed to allocate as many pages as requested to fill the balloon with, continuing with as many as possible ({})",
 							target_num_pages - num_remaining
@@ -670,10 +670,12 @@ impl BalloonStorage {
 						break;
 					}
 
-					let old_pow_2 = current_pow_2;
-					current_pow_2 = old_pow_2 >> 1;
+					let old_exponent = current_exponent;
+					current_exponent -= 1;
 					trace!(
-						"<balloon> Failed to allocate new chunk of 2^{old_pow_2} pages to fill the balloon with, reducing chunk size to 2^{current_pow_2}"
+						"<balloon> Failed to allocate new chunk of 2^{old_exponent} ({}) pages to fill the balloon with, reducing chunk size to 2^{current_exponent} ({})",
+						1u32 << old_exponent,
+						1u32 << current_exponent,
 					);
 
 					continue;
