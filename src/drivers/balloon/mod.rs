@@ -228,6 +228,8 @@ impl VirtioBalloonDriver {
 		}
 	}
 
+	// FIXME: virtqueue descriptor exhaustion (-> currently panics) when too many chunks are needed to fulfill an inflate/deflate request
+
 	/// Deflate the balloon by the given number of pages.
 	///
 	/// # Panics
