@@ -35,6 +35,8 @@ mod pci;
 
 const BALLOON_PAGE_SIZE: usize = 4096;
 
+// TODO: prevent possible deflate of not yet acknowledged inflated pages. See VIRTIO v1.2 5.5.6.1
+
 /// A wrapper struct for the raw configuration structure.
 /// Handling the right access to fields, as some are read-only
 /// for the driver.
