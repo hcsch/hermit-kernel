@@ -4,6 +4,7 @@ use core::alloc::Layout;
 use core::fmt::Debug;
 use core::num::{NonZeroU32, NonZeroUsize};
 use core::ptr::NonNull;
+use core::time::Duration;
 
 use memory_addresses::VirtAddr;
 use pci_types::InterruptLine;
@@ -34,6 +35,9 @@ pub mod oom;
 mod pci;
 
 const BALLOON_PAGE_SIZE: usize = 4096;
+
+const VOLUNTARY_INFLATE_INTERVAL_MICROS: u64 = 1_000_000;
+const VOLUNTARY_INFLATE_MAX_SIZE_BYTES: u32 = 1 << 31; // 2 GiB
 
 // TODO: prevent possible deflate of not yet acknowledged inflated pages. See VIRTIO v1.2 5.5.6.1
 
@@ -78,6 +82,7 @@ pub(crate) struct VirtioBalloonDriver {
 	num_targeted: u32,
 
 	balloon_storage: BalloonStorage,
+	last_voluntary_inflate: u64,
 }
 
 // Backend-independent interface for VIRTIO traditional memory balloon driver
@@ -193,7 +198,8 @@ impl VirtioBalloonDriver {
 
 	pub(crate) fn poll_events(&mut self) {
 		trace!("<balloon> Driver is being polled...");
-		self.adjust_balloon_size();
+
+		trace!("<balloon> Processing acknowledgements for inflation/deflation");
 
 		let mut changed = false;
 
@@ -228,6 +234,8 @@ impl VirtioBalloonDriver {
 			);
 			self.dev_cfg.set_actual(self.num_in_balloon);
 		}
+
+		self.adjust_balloon_size();
 	}
 
 	// FIXME: virtqueue descriptor exhaustion (-> currently panics) when too many chunks are needed to fulfill an inflate/deflate request
@@ -280,7 +288,7 @@ impl VirtioBalloonDriver {
 	}
 
 	fn inflate(&mut self, talc: &mut Talc<HermitOomHandler>, num_pages_to_inflate: u32) {
-		trace!("<balloon> Attempting to inflate by {num_pages_to_inflate} pages");
+		trace!("<balloon> Attempting to inflate as much as possible");
 
 		let page_indices = self
 			.balloon_storage
@@ -304,38 +312,50 @@ impl VirtioBalloonDriver {
 	}
 
 	fn adjust_balloon_size(&mut self) {
-		trace!("<balloon> Adjusting balloon size if necessary");
-		let Some(new_target_num_pages) = self.num_pages_changed() else {
-			trace!("<balloon> No balloon size change requested");
-			return;
+		trace!("<balloon> Adjusting balloon size");
+
+		if let Some(new_target_num_pages) = self.num_pages_changed() {
+			if new_target_num_pages < self.num_in_balloon - self.num_pending_deflation {
+				let num_to_deflate =
+					(self.num_in_balloon - self.num_pending_deflation) - new_target_num_pages;
+
+				info!(
+					"<balloon> Size change requested: deflate of {num_to_deflate}, from {} (with pending: inflation={} deflation={}) to {new_target_num_pages}",
+					self.num_in_balloon, self.num_pending_inflation, self.num_pending_deflation
+				);
+
+				trace!("<balloon> Ignoring, we only deflate on OOM");
+			} else if new_target_num_pages > self.num_in_balloon + self.num_pending_inflation {
+				let num_to_inflate =
+					new_target_num_pages - (self.num_in_balloon + self.num_pending_inflation);
+
+				info!(
+					"<balloon> Size change requested: inflate of {num_to_inflate}, from {} (with pending: inflation={} deflation={}) to {new_target_num_pages}",
+					self.num_in_balloon, self.num_pending_inflation, self.num_pending_deflation
+				);
+
+				self.inflate(&mut ALLOCATOR.inner().lock(), num_to_inflate);
+				trace!("<balloon> Done inflating");
+			}
 		};
 
-		if new_target_num_pages < self.num_in_balloon - self.num_pending_deflation {
-			let num_to_deflate =
-				(self.num_in_balloon - self.num_pending_deflation) - new_target_num_pages;
+		let now = crate::arch::processor::get_timestamp();
 
-			info!(
-				"<balloon> Size change requested: deflate of {num_to_deflate}, from {} (with pending: inflation={} deflation={}) to {new_target_num_pages}",
-				self.num_in_balloon, self.num_pending_inflation, self.num_pending_deflation
+		if now
+			>= self.last_voluntary_inflate
+				+ u64::from(crate::arch::processor::get_frequency())
+					* VOLUNTARY_INFLATE_INTERVAL_MICROS
+		{
+			debug!("<balloon> Voluntarily inflating balloon as much as we can");
+			self.inflate(
+				&mut ALLOCATOR.inner().lock(),
+				VOLUNTARY_INFLATE_MAX_SIZE_BYTES,
 			);
-
-			// SAFETY: We always use the one global instance of `Talc` Hermit uses
-			//         as its global allocator, both for inflating and deflating.
-			unsafe {
-				self.deflate(&mut ALLOCATOR.inner().lock(), num_to_deflate);
-			}
-			trace!("<balloon> Done deflating");
-		} else if new_target_num_pages > self.num_in_balloon + self.num_pending_inflation {
-			let num_to_inflate =
-				new_target_num_pages - (self.num_in_balloon + self.num_pending_inflation);
-
-			info!(
-				"<balloon> Size change requested: inflate of {num_to_inflate}, from {} (with pending: inflation={} deflation={}) to {new_target_num_pages}",
-				self.num_in_balloon, self.num_pending_inflation, self.num_pending_deflation
+			trace!(
+				"<balloon> Done inflating. Next voluntary inflate in {:?}",
+				Duration::from_micros(VOLUNTARY_INFLATE_INTERVAL_MICROS)
 			);
-
-			self.inflate(&mut ALLOCATOR.inner().lock(), num_to_inflate);
-			trace!("<balloon> Done inflating");
+			self.last_voluntary_inflate = now;
 		}
 	}
 

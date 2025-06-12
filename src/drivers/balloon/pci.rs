@@ -65,6 +65,7 @@ impl VirtioBalloonDriver {
 			num_targeted: 0,
 
 			balloon_storage: BalloonStorage::new(),
+			last_voluntary_inflate: 0,
 		})
 	}
 
