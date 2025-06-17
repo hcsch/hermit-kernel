@@ -65,6 +65,7 @@ impl DescrRing {
 			trace!("<vq:split> Attempting to assign descriptor to free slot in table");
 
 			index = self.mem_pool.pool.pop().ok_or(VirtqError::NoDescrAvail)?.0;
+			trace!("<vq:split> Assigned one descriptor (indirect)");
 			self.descr_table_mut()[usize::from(index)] = MaybeUninit::new(descriptor);
 		} else {
 			trace!("<vq:split> Creating direct descriptor iterator");
@@ -74,12 +75,15 @@ impl DescrRing {
 				"<vq:split> Attempting to assign descriptors to free slots in table in reverse order"
 			);
 
+			let mut num_descriptors_assigned = 0;
+
 			// We need to handle the last descriptor (the first for the reversed iterator) specially to not set the next flag.
 			{
 				// If the [AvailBufferToken] is empty, we panic
 				let descriptor = rev_all_desc_iter.next().unwrap();
 
 				index = self.mem_pool.pool.pop().ok_or(VirtqError::NoDescrAvail)?.0;
+				num_descriptors_assigned += 1;
 				self.descr_table_mut()[usize::from(index)] = MaybeUninit::new(descriptor);
 			}
 			for mut descriptor in rev_all_desc_iter {
@@ -87,13 +91,15 @@ impl DescrRing {
 				descriptor.next = le16::from(index);
 
 				index = self.mem_pool.pool.pop().ok_or(VirtqError::NoDescrAvail)?.0;
+				num_descriptors_assigned += 1;
 				self.descr_table_mut()[usize::from(index)] = MaybeUninit::new(descriptor);
 			}
 			// At this point, `index` is the index of the last element of the reversed iterator,
 			// thus the head of the descriptor chain.
+			trace!("<vq:split> Assigned {num_descriptors_assigned} descriptors (direct)");
 		}
 
-		trace!("<vq:split> Inserting transfer token into token ring");
+		trace!("<vq:split> Inserting transfer token into token ring at index {index}");
 
 		self.token_ring[usize::from(index)] = Some(tkn);
 
@@ -123,9 +129,11 @@ impl DescrRing {
 				"The buff_id is incorrect or the reference to the TransferToken was misplaced.",
 			);
 
+		let mut num_descriptors_freed = 0;
 		// We return the indices of the now freed ring slots back to `mem_pool.`
 		let mut id_ret_idx = u16::try_from(used_elem.id.to_ne()).unwrap();
 		loop {
+			num_descriptors_freed += 1;
 			self.mem_pool.ret_id(super::MemDescrId(id_ret_idx));
 			let cur_chain_elem =
 				unsafe { self.descr_table_mut()[usize::from(id_ret_idx)].assume_init() };
@@ -135,6 +143,7 @@ impl DescrRing {
 				break;
 			}
 		}
+		trace!("<vq:split> freed {num_descriptors_freed} descriptors");
 
 		memory_barrier();
 		self.read_idx = self.read_idx.wrapping_add(1);
