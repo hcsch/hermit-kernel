@@ -1,0 +1,21 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Launch",
+            "targetCreateCommands": [
+                "target create ${workspaceFolder}/../target/x86_64-unknown-hermit/debug/dyn_mem",
+                "target modules load --file dyn_mem --slide 0x1a00000"
+            ],
+            "processCreateCommands": [
+                "gdb-remote localhost:1234",
+                // "settings set target.require-hardware-breakpoint true",
+                "break set -n _ZN6hermit6hermit19boot_processor_main17h32c0de1de7df11cbE"
+            ],
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}
