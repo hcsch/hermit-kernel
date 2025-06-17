@@ -37,6 +37,10 @@ impl OomHandler for DeflateBalloonOnOom {
 			return Err(());
 		};
 
-		unsafe { ballon_driver_guard.deflate_for_oom(talc, (layout.size() / 4096) as u32) }
+		// For Talc's tag adjacent to the allocation, just always free one page more.
+		// Divide rounding up so the allocation always fits even if it's not a multiple of 4K pages large.
+		unsafe {
+			ballon_driver_guard.deflate_for_oom(talc, (layout.size().div_ceil(4096)) as u32 + 1)
+		}
 	}
 }
