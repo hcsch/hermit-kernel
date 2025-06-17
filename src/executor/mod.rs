@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+#[cfg(feature = "allocation-stats")]
+mod alloc_stats;
 #[cfg(feature = "balloon")]
 mod balloon;
 #[cfg(any(feature = "tcp", feature = "udp"))]
@@ -129,6 +131,8 @@ pub fn init() {
 	crate::executor::network::init();
 	#[cfg(feature = "vsock")]
 	crate::executor::vsock::init();
+	#[cfg(feature = "allocation-stats")]
+	crate::executor::alloc_stats::init();
 	#[cfg(feature = "balloon")]
 	crate::executor::balloon::init();
 }
