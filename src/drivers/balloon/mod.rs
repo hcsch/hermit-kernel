@@ -458,6 +458,15 @@ impl BalloonVq {
 		vq.disable_notifs();
 	}
 
+	fn is_empty(&self) -> bool {
+		let Some(vq) = &self.vq else {
+			debug!("<balloon> BalloonVq::disable_notifs called on uninitialized vq");
+			return true;
+		};
+
+		vq.is_empty()
+	}
+
 	fn used_send_buff_to_page_indices(
 		used_send_buff: SmallVec<[BufferElem; 2]>,
 	) -> impl Iterator<Item = u32> {
@@ -548,6 +557,25 @@ impl BalloonVq {
 				}
 			}
 		}
+
+		num_discarded
+	}
+
+	pub fn discard_blocking_until_empty(&mut self) -> usize {
+		self.disable_notifs();
+
+		trace!(
+			"<balloon> trying to empty the virtqueue, blocking until all elements have been discarded"
+		);
+
+		let mut num_discarded = 0;
+		while !self.is_empty() {
+			num_discarded += self.discard_new_used();
+		}
+
+		trace!("<balloon> done emptying the virtqueue");
+
+		self.enable_notifs();
 
 		num_discarded
 	}
