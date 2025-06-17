@@ -587,6 +587,11 @@ impl BalloonVq {
 			.flat_map(|index| index.to_le_bytes())
 			.collect_into(&mut page_indices_bytes);
 
+		if page_indices_bytes.is_empty() {
+			debug!("<balloon> Vec of page indices is empty, doing nothing");
+			return Ok(());
+		}
+
 		let buff_tkn = AvailBufferToken::new(
 			smallvec![BufferElem::Vector(page_indices_bytes)],
 			smallvec![],
