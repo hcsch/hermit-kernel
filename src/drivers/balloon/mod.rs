@@ -1,4 +1,3 @@
-use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::alloc::Layout;
 use core::fmt::Debug;
